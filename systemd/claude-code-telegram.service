@@ -1,0 +1,33 @@
+[Unit]
+Description=claude-code-telegram — Telegram bridge to Claude Code CLI
+Documentation=https://github.com/trs0817/claude-code-telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Service user — set by install.sh; must NOT be root.
+User=__REPLACE_USER__
+
+# Environment is loaded from a 0600-protected file to keep secrets out of
+# journalctl output and systemctl status.
+EnvironmentFile=__REPLACE_ENV_FILE__
+
+ExecStart=/usr/bin/python3 __REPLACE_SCRIPT_PATH__
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# install.sh appends VAULT_PATH here at install time so the bot can write
+# within the project directory (for --continue session state, etc.)
+ReadWritePaths=__REPLACE_HOME__ __REPLACE_VAULT_PATH__
+
+[Install]
+WantedBy=multi-user.target

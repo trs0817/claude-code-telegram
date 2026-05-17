@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, syntax, tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytest ruff
+
+      - name: Syntax check
+        run: python -m py_compile src/claude_telegram_bot.py
+
+      - name: Lint with ruff
+        run: ruff check src/ tests/
+
+      - name: Run pytest
+        run: pytest tests/ -v
+
+      - name: Validate systemd unit syntax (best-effort)
+        if: runner.os == 'Linux'
+        run: |
+          if command -v systemd-analyze >/dev/null 2>&1; then
+            # systemd-analyze verify needs the unit installed; copy to a tmp path
+            sudo cp systemd/claude-code-telegram.service /etc/systemd/system/claude-code-telegram.service
+            sudo systemd-analyze verify /etc/systemd/system/claude-code-telegram.service || true
+            sudo rm /etc/systemd/system/claude-code-telegram.service
+          fi
+
+  shellcheck:
+    name: ShellCheck install scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./scripts
+          severity: warning

@@ -1,0 +1,18 @@
+# Optional: pipe service failures through a notify-failure@.service template.
+#
+# This requires that you already have a `notify-failure@.service` template
+# installed on the system (e.g. from a separate alerting stack that pings
+# your phone via Telegram, Slack, etc.). If you don't have one, ignore this
+# file — the bot will still restart on failure via Restart=on-failure.
+#
+# Install at:
+#   /etc/systemd/system/claude-code-telegram.service.d/notify-on-fail.conf
+#
+# Then: sudo systemctl daemon-reload
+#
+# When the bot crashes, systemd will start notify-failure@claude-code-telegram.service,
+# which (in a typical setup) sends an alert via a different channel — important,
+# because a crashed claude-code-telegram bot can't notify you itself.
+
+[Unit]
+OnFailure=notify-failure@%n
