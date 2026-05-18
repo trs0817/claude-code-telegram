@@ -758,9 +758,14 @@ fi
 # Write environment file
 # ---------------------------------------------------------------------------
 say "Writing environment file"
+if [[ $IS_MACOS -eq 1 ]]; then
+    RESTART_CMD="sudo launchctl unload $UNIT_DEST && sudo launchctl load -w $UNIT_DEST"
+else
+    RESTART_CMD="sudo systemctl restart $SERVICE_NAME"
+fi
 cat > "$ENV_FILE" <<EOF
 # claude-code-telegram environment -- managed by installer
-# Edit then restart: $(if [[ $IS_MACOS -eq 1 ]]; then echo "sudo launchctl unload $UNIT_DEST && sudo launchctl load -w $UNIT_DEST"; else echo "sudo systemctl restart $SERVICE_NAME"; fi)
+# Edit then restart: ${RESTART_CMD}
 TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
 TELEGRAM_CHAT_ID=${CHAT_ID}
 ALLOWED_USERS=${ALLOWED_USERS}
@@ -816,4 +821,4 @@ else
 fi
 if svc_active; then
     ok "$SERVICE_NAME is running"
-    printf "\n${C_GREEN}${C_BOLD}  Installation comp
+    printf "\n${C_GR
