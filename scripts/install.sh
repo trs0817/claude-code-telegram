@@ -813,28 +813,4 @@ if svc_active; then
     ok "$SERVICE_NAME is running"
     printf "\n${C_GREEN}${C_BOLD}  Installation complete!${C_RESET}\n\n"
     printf "   Tail logs:   %s\n" "$LOG_CMD"
-    printf "   Stop:        sudo %s\n" "$(if [[ $IS_MACOS -eq 1 ]]; then echo "launchctl unload $UNIT_DEST"; else echo "systemctl stop $SERVICE_NAME"; fi)"
-    printf "   Update:      curl -sSL https://raw.githubusercontent.com/trs0817/claude-code-telegram/main/bootstrap.sh | bash -s -- --update\n"
-    printf "   Uninstall:   sudo %s/scripts/uninstall.sh\n" "$REPO_DIR"
-    printf "\n   You should receive an online message in Telegram shortly.\n\n"
-else
-    warn "$SERVICE_NAME failed to start. Diagnosing..."
-    printf "\n"
-    JOURNAL=$(svc_recent_logs)
-    if echo "$JOURNAL" | grep -q "credentials"; then
-        warn "Looks like a Claude auth issue."
-        info "Run: sudo -u $SERVICE_USER -H $CLAUDE_BIN auth login"
-        info "Then restart the service."
-    elif echo "$JOURNAL" | grep -q "BOT_TOKEN\|401\|Unauthorized"; then
-        warn "Looks like an invalid bot token."
-        info "Check your token in $ENV_FILE and restart."
-    elif echo "$JOURNAL" | grep -q "ModuleNotFoundError\|No module"; then
-        warn "Missing Python dependency."
-        info "Run: pip3 install requests --break-system-packages"
-        info "Then restart the service."
-    else
-        warn "Recent logs:"
-        echo "$JOURNAL" | tail -20
-    fi
-    exit 1
-fi
+    printf "   Stop:        sudo %s\n" "$(if [[ $IS_MACOS -e
