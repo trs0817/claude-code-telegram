@@ -35,7 +35,7 @@ IS_MACOS=0
 # Constants
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOT_VERSION="v2.0.0"   # ← bump this with every release
+BOT_VERSION="v2.0.1"   # ← bump this with every release
 SERVICE_NAME="claude-code-telegram"
 INSTALL_DIR="/opt/claude-code-telegram"
 VERSION_FILE="/usr/local/share/claude-code-telegram/VERSION"

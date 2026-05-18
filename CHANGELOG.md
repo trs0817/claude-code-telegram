@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-05-18
+
+### Added
+
+- **Automatic update notifications** — installer drops a weekly cron (`/etc/cron.d/claude-code-telegram-update`) that checks GitHub for new releases and pings you via `claude-notify` when one is available
+- **VERSION file** — installer writes installed version to `/usr/local/share/claude-code-telegram/VERSION`; update check reads it dynamically so no hardcoding needed after each update
+- **`check-cct-update` helper** — installed to `/usr/local/bin/check-cct-update`; can also be run manually at any time
+
 ## [2.0.0] — 2026-05-17
 
 ### Added
