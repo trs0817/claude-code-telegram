@@ -2,6 +2,8 @@
 #
 # claude-code-telegram installer
 #
+# Supports Linux (systemd) and macOS (launchd).
+#
 # Usage:
 #   sudo ./scripts/install.sh            # normal install
 #   sudo ./scripts/install.sh --dry-run  # preview without writing anything
@@ -23,6 +25,13 @@ for arg in "$@"; do
 done
 
 # ---------------------------------------------------------------------------
+# OS detection
+# ---------------------------------------------------------------------------
+OS_TYPE=$(uname -s)
+IS_MACOS=0
+[[ "$OS_TYPE" == "Darwin" ]] && IS_MACOS=1
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,9 +39,18 @@ SERVICE_NAME="claude-code-telegram"
 INSTALL_DIR="/opt/claude-code-telegram"
 SCRIPT_DEST="${INSTALL_DIR}/claude_telegram_bot.py"
 NOTIFY_DEST="/usr/local/bin/claude-notify"
-UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
 ENV_FILE="/etc/claude-code-telegram.env"
 OBSIDIAN_REPO="https://github.com/AgriciDaniel/claude-obsidian"
+
+# Platform-specific service paths
+PLIST_LABEL="com.trs0817.claude-code-telegram"
+if [[ $IS_MACOS -eq 1 ]]; then
+    UNIT_DEST="/Library/LaunchDaemons/${PLIST_LABEL}.plist"
+    LAUNCHER_DEST="/usr/local/bin/claude-code-telegram-launcher"
+    LOG_FILE="/var/log/claude-code-telegram.log"
+else
+    UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
+fi
 
 C_RESET=$'\033[0m'
 C_BOLD=$'\033[1m'
@@ -57,7 +75,6 @@ header() {
 }
 
 ask() {
-    # All prompts go to /dev/tty so $() captures only the return value
     local prompt="$1" default="${2:-}" var
     if [[ -n "$default" ]]; then
         printf "   %s ${C_DIM}[%s]${C_RESET}: " "$prompt" "$default" >/dev/tty
@@ -79,8 +96,6 @@ ask_secret() {
 }
 
 pick() {
-    # pick <prompt> <option1> <option2> ...
-    # All display goes to /dev/tty; only chosen string goes to stdout
     local prompt="$1"; shift
     local options=("$@")
     local default="${options[0]}"
@@ -112,10 +127,79 @@ require_root() {
     [[ $EUID -eq 0 ]] || die "This installer must be run as root (use sudo)."
 }
 
+# Cross-platform: get home directory for a user
+get_user_home() {
+    local user="$1"
+    if [[ $IS_MACOS -eq 1 ]]; then
+        dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null \
+            | awk '{print $2}' \
+            || eval echo "~$user"
+    else
+        getent passwd "$user" | cut -d: -f6
+    fi
+}
+
+# Service management wrappers (Linux vs macOS)
+svc_start() {
+    if [[ $IS_MACOS -eq 1 ]]; then
+        launchctl load -w "$UNIT_DEST"
+    else
+        systemctl start "$SERVICE_NAME"
+    fi
+}
+
+svc_stop() {
+    if [[ $IS_MACOS -eq 1 ]]; then
+        launchctl unload "$UNIT_DEST" 2>/dev/null || true
+    else
+        systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    fi
+}
+
+svc_enable() {
+    # launchctl load -w handles enable+start in one step; systemd needs both
+    [[ $IS_MACOS -eq 0 ]] && systemctl enable "$SERVICE_NAME" >/dev/null
+}
+
+svc_active() {
+    if [[ $IS_MACOS -eq 1 ]]; then
+        launchctl list 2>/dev/null | grep -q "$PLIST_LABEL"
+    else
+        systemctl is-active --quiet "$SERVICE_NAME"
+    fi
+}
+
+svc_daemon_reload() {
+    [[ $IS_MACOS -eq 0 ]] && systemctl daemon-reload
+}
+
+svc_reset_failed() {
+    [[ $IS_MACOS -eq 0 ]] && systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+}
+
+svc_log_cmd() {
+    if [[ $IS_MACOS -eq 1 ]]; then
+        echo "tail -f $LOG_FILE"
+    else
+        echo "journalctl -u $SERVICE_NAME -f"
+    fi
+}
+
+svc_recent_logs() {
+    if [[ $IS_MACOS -eq 1 ]]; then
+        tail -30 "$LOG_FILE" 2>/dev/null || true
+    else
+        journalctl -u "$SERVICE_NAME" -n 30 --no-pager 2>/dev/null || true
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Banner
 # ---------------------------------------------------------------------------
 require_root
+
+PLATFORM_LABEL="Linux (systemd)"
+[[ $IS_MACOS -eq 1 ]] && PLATFORM_LABEL="macOS (launchd)"
 
 printf "\n${C_BOLD}${C_CYAN}"
 printf "  +---------------------------------------+\n"
@@ -124,6 +208,7 @@ printf "  |   claude-code-telegram installer      |\n"
 [[ $UPDATE  -eq 1 ]] && printf "  |              UPDATE MODE               |\n"
 printf "  +---------------------------------------+\n"
 printf "${C_RESET}\n"
+info "Platform: $PLATFORM_LABEL"
 
 # ---------------------------------------------------------------------------
 # Pre-flight checks
@@ -146,9 +231,14 @@ if ! python3 -c 'import requests' 2>/dev/null; then
 fi
 ok "python3 requests"
 
-# systemd
-command -v systemctl >/dev/null 2>&1 || die "systemctl not found -- systemd is required."
-ok "systemd available"
+# Service manager
+if [[ $IS_MACOS -eq 1 ]]; then
+    command -v launchctl >/dev/null 2>&1 || die "launchctl not found -- is this macOS?"
+    ok "launchctl available"
+else
+    command -v systemctl >/dev/null 2>&1 || die "systemctl not found -- systemd is required."
+    ok "systemd available"
+fi
 
 # curl (used for chat ID auto-fetch)
 command -v curl >/dev/null 2>&1 && HAS_CURL=1 || HAS_CURL=0
@@ -180,28 +270,37 @@ fi
 # Update mode: detect existing install
 # ---------------------------------------------------------------------------
 EXISTING_INSTALL=0
-if [[ -f "$ENV_FILE" ]]; then
-    EXISTING_INSTALL=1
-fi
+[[ -f "$ENV_FILE" ]] && EXISTING_INSTALL=1
 
 if [[ $UPDATE -eq 1 ]]; then
-    if [[ $EXISTING_INSTALL -eq 0 ]]; then
+    [[ $EXISTING_INSTALL -eq 0 ]] && \
         die "--update specified but no existing install found ($ENV_FILE missing)."
-    fi
     say "Updating existing install"
     install -d -m 755 "$INSTALL_DIR"
     install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
     ok "Bot script updated -> $SCRIPT_DEST"
     install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
     ok "claude-notify updated -> $NOTIFY_DEST"
-    systemctl daemon-reload
-    systemctl restart "$SERVICE_NAME"
+
+    if [[ $IS_MACOS -eq 1 ]]; then
+        # Refresh launcher (script path may have changed)
+        sed "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
+            "$REPO_DIR/scripts/launch-wrapper.sh" > "$LAUNCHER_DEST"
+        chmod 755 "$LAUNCHER_DEST"
+        ok "Launcher updated -> $LAUNCHER_DEST"
+        svc_stop
+        svc_start
+    else
+        systemctl daemon-reload
+        systemctl restart "$SERVICE_NAME"
+    fi
+
     sleep 2
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
+    if svc_active; then
         ok "$SERVICE_NAME restarted successfully"
     else
         warn "Service failed to restart. Logs:"
-        journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+        svc_recent_logs | tail -20
         exit 1
     fi
     printf "\n${C_GREEN}${C_BOLD}  Update complete!${C_RESET}\n\n"
@@ -221,15 +320,21 @@ if [[ $EXISTING_INSTALL -eq 1 ]] && [[ $DRY_RUN -eq 0 ]]; then
             install -d -m 755 "$INSTALL_DIR"
             install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
             install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
-            systemctl daemon-reload
-            systemctl restart "$SERVICE_NAME" 2>/dev/null || systemctl start "$SERVICE_NAME"
+            if [[ $IS_MACOS -eq 1 ]]; then
+                sed "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
+                    "$REPO_DIR/scripts/launch-wrapper.sh" > "$LAUNCHER_DEST"
+                chmod 755 "$LAUNCHER_DEST"
+                svc_stop; svc_start
+            else
+                systemctl daemon-reload
+                systemctl restart "$SERVICE_NAME" 2>/dev/null || systemctl start "$SERVICE_NAME"
+            fi
             ok "Reinstalled and restarted."
             exit 0
             ;;
         Cancel*)
             die "Aborted."
             ;;
-        # Reconfigure falls through to full wizard
     esac
 fi
 
@@ -242,15 +347,15 @@ info "It must be the same user whose claude credentials you want to use."
 DEFAULT_USER=$(logname 2>/dev/null || echo "${SUDO_USER:-$USER}")
 SERVICE_USER=$(ask "Service user" "$DEFAULT_USER")
 id "$SERVICE_USER" >/dev/null 2>&1 || die "User '$SERVICE_USER' does not exist."
-USER_HOME=$(getent passwd "$SERVICE_USER" | cut -d: -f6)
+USER_HOME=$(get_user_home "$SERVICE_USER")
 ok "Service user: $SERVICE_USER (home: $USER_HOME)"
 
 # ---------------------------------------------------------------------------
 # Step 2 -- Claude binary
 # ---------------------------------------------------------------------------
 header "Step 2 of 8 -- Claude Code"
-info "Systemd does not use your shell PATH, so we need the full binary path."
-CLAUDE_BIN=$(ask "Path to claude binary" "${CLAUDE_BIN_FOUND:-/usr/bin/claude}")
+info "The service manager does not use your shell PATH, so we need the full path."
+CLAUDE_BIN=$(ask "Path to claude binary" "${CLAUDE_BIN_FOUND:-/usr/local/bin/claude}")
 [[ -x "$CLAUDE_BIN" ]] || die "Not executable: $CLAUDE_BIN"
 
 CLAUDE_VER_CHECK=$(sudo -u "$SERVICE_USER" -H "$CLAUDE_BIN" --version 2>/dev/null | head -1 || true)
@@ -269,7 +374,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
         warn "Claude is not authenticated for '$SERVICE_USER'."
         warn "You have two options:"
         info ""
-        info "Option A -- Browser auth (if this machine has a browser):"
+        info "Option A -- Browser auth:"
         info "  Open another terminal and run:"
         info "    sudo -u $SERVICE_USER -H $CLAUDE_BIN auth login"
         info ""
@@ -302,7 +407,6 @@ for candidate in "$USER_HOME/notes" "$USER_HOME/Notes" "$USER_HOME/Documents/not
     [[ -d "$candidate" ]] && VAULT_CANDIDATES+=("$candidate")
 done
 
-# Deduplicate
 readarray -t VAULT_CANDIDATES < <(printf '%s\n' "${VAULT_CANDIDATES[@]}" | sort -u 2>/dev/null || true)
 
 VAULT_DEFAULT="$USER_HOME/notes"
@@ -327,11 +431,9 @@ VAULT_PATH=$(ask "Project directory" "$VAULT_DEFAULT")
 [[ -d "$VAULT_PATH" ]] || die "Directory does not exist: $VAULT_PATH"
 ok "Project directory: $VAULT_PATH"
 
-# Suggest Obsidian setup if no .obsidian folder found
 if [[ ! -d "$VAULT_PATH/.obsidian" ]]; then
     printf "\n"
-    info "Tip: For the best experience, use an Obsidian vault with Claude skills"
-    info "configured. If you want to set one up:"
+    info "Tip: For the best experience, use an Obsidian vault with Claude skills."
     info "  $OBSIDIAN_REPO"
     info "You can change VAULT_PATH anytime by editing $ENV_FILE"
     printf "\n"
@@ -367,7 +469,6 @@ if [[ $HAS_CURL -eq 1 ]]; then
         printf "   Waiting a moment for Telegram to register your message..." >/dev/tty
         sleep 2
 
-        # Try up to 3 times in case the update hasn't propagated yet
         FETCHED_ID=""
         for _attempt in 1 2 3; do
             TG_RESP=$(curl -s --max-time 10 \
@@ -380,7 +481,6 @@ try:
     if not data.get('ok'):
         sys.stderr.write('API error: ' + str(data.get('description', data)) + '\n')
         sys.exit(1)
-    # Accept any update type that carries a chat object
     for upd in reversed(data.get('result', [])):
         for key in ('message', 'channel_post', 'edited_message', 'edited_channel_post', 'my_chat_member'):
             obj = upd.get(key, {})
@@ -411,7 +511,6 @@ except Exception as e:
             info "  3. Wrong bot token"
             info ""
             info "Find your ID manually: https://api.telegram.org/bot${BOT_TOKEN}/getUpdates"
-            info "(open that URL in a browser after sending the bot a message)"
         fi
     else
         CHAT_ID="$manual_id"
@@ -425,7 +524,6 @@ while [[ -z "$CHAT_ID" ]] || ! [[ "$CHAT_ID" =~ ^-?[0-9]+$ ]]; do
 done
 ok "Chat ID: $CHAT_ID"
 
-# Additional allowed users
 printf "\n"
 info "You can allow additional users to use the bot (comma-separated chat IDs)."
 info "Leave blank for single-user (just you)."
@@ -468,8 +566,8 @@ info "How should claude handle tool use (bash commands, file writes, etc.)?"
 info ""
 
 PERM_CHOICE=$(pick "Choose permission mode:" \
-    "safe -- file edits auto-approved; bash commands may be blocked (recommended)" \
-    "unrestricted -- all operations auto-approved; shows plan first for review")
+    "safe -- file edits auto-approved; shows plan for review (recommended)" \
+    "unrestricted -- all operations auto-approved with /dangerously-skip-permissions")
 
 if [[ "$PERM_CHOICE" == safe* ]]; then
     PERMISSION_MODE="safe"
@@ -511,7 +609,7 @@ TYPING_INDICATOR="1"
 ok "Typing indicator: $TYPING_CHOICE"
 
 # ---------------------------------------------------------------------------
-# Run a test invocation (skip in dry-run)
+# Test invocation
 # ---------------------------------------------------------------------------
 if [[ $DRY_RUN -eq 0 ]] && [[ -n "$CLAUDE_BIN_FOUND" ]]; then
     say "Testing Claude invocation"
@@ -535,6 +633,7 @@ fi
 # Summary
 # ---------------------------------------------------------------------------
 printf "\n${C_BOLD}${C_CYAN}-- Summary $(printf -- '-%.0s' {1..38})${C_RESET}\n"
+printf "   %-22s %s\n" "Platform:"          "$PLATFORM_LABEL"
 printf "   %-22s %s\n" "Service user:"      "$SERVICE_USER"
 printf "   %-22s %s\n" "Project directory:" "$VAULT_PATH"
 printf "   %-22s %s\n" "Claude binary:"     "$CLAUDE_BIN"
@@ -555,7 +654,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Install (or dry-run preview)
+# Dry-run preview
 # ---------------------------------------------------------------------------
 if [[ $DRY_RUN -eq 1 ]]; then
     printf "\n${C_BOLD}${C_CYAN}-- Generated: %s${C_RESET}\n" "$ENV_FILE"
@@ -578,22 +677,41 @@ POLL_INTERVAL=2
 EOF
     printf "\n${C_BOLD}${C_CYAN}-- Generated: %s${C_RESET}\n" "$UNIT_DEST"
     printf '%s\n' "$(printf -- '-%.0s' {1..50})"
-    sed \
-        -e "s|__REPLACE_USER__|${SERVICE_USER}|g" \
-        -e "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
-        -e "s|__REPLACE_ENV_FILE__|${ENV_FILE}|g" \
-        -e "s|__REPLACE_HOME__|${USER_HOME}|g" \
-        -e "s|__REPLACE_VAULT_PATH__|${VAULT_PATH}|g" \
-        "$REPO_DIR/systemd/${SERVICE_NAME}.service"
+    if [[ $IS_MACOS -eq 1 ]]; then
+        sed \
+            -e "s|__REPLACE_USER__|${SERVICE_USER}|g" \
+            -e "s|__REPLACE_LAUNCHER__|${LAUNCHER_DEST}|g" \
+            "$REPO_DIR/launchd/com.trs0817.claude-code-telegram.plist"
+        printf "\n${C_BOLD}${C_CYAN}-- Generated: %s${C_RESET}\n" "$LAUNCHER_DEST"
+        printf '%s\n' "$(printf -- '-%.0s' {1..50})"
+        sed "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
+            "$REPO_DIR/scripts/launch-wrapper.sh"
+    else
+        sed \
+            -e "s|__REPLACE_USER__|${SERVICE_USER}|g" \
+            -e "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
+            -e "s|__REPLACE_ENV_FILE__|${ENV_FILE}|g" \
+            -e "s|__REPLACE_HOME__|${USER_HOME}|g" \
+            -e "s|__REPLACE_VAULT_PATH__|${VAULT_PATH}|g" \
+            "$REPO_DIR/systemd/${SERVICE_NAME}.service"
+    fi
     printf "\n${C_BOLD}Commands that would run:${C_RESET}\n"
     printf "   install -d -m 755 %s\n" "$INSTALL_DIR"
     printf "   install -m 644 src/claude_telegram_bot.py %s\n" "$SCRIPT_DEST"
     printf "   install -m 755 scripts/claude-notify %s\n" "$NOTIFY_DEST"
-    printf "   systemctl daemon-reload && enable && start %s\n" "$SERVICE_NAME"
+    if [[ $IS_MACOS -eq 1 ]]; then
+        printf "   install launcher -> %s\n" "$LAUNCHER_DEST"
+        printf "   launchctl load -w %s\n" "$UNIT_DEST"
+    else
+        printf "   systemctl daemon-reload && enable && start %s\n" "$SERVICE_NAME"
+    fi
     printf "\n${C_GREEN}${C_BOLD}  Dry run complete -- nothing was written.${C_RESET}\n\n"
     exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# Install files
+# ---------------------------------------------------------------------------
 say "Installing files"
 install -d -m 755 "$INSTALL_DIR"
 install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
@@ -602,10 +720,20 @@ ok "Bot script -> $SCRIPT_DEST"
 install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
 ok "claude-notify -> $NOTIFY_DEST"
 
+if [[ $IS_MACOS -eq 1 ]]; then
+    sed "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
+        "$REPO_DIR/scripts/launch-wrapper.sh" > "$LAUNCHER_DEST"
+    chmod 755 "$LAUNCHER_DEST"
+    ok "Launcher -> $LAUNCHER_DEST"
+fi
+
+# ---------------------------------------------------------------------------
+# Write environment file
+# ---------------------------------------------------------------------------
 say "Writing environment file"
 cat > "$ENV_FILE" <<EOF
 # claude-code-telegram environment -- managed by installer
-# Edit then: sudo systemctl restart $SERVICE_NAME
+# Edit then restart: $(if [[ $IS_MACOS -eq 1 ]]; then echo "sudo launchctl unload $UNIT_DEST && sudo launchctl load -w $UNIT_DEST"; else echo "sudo systemctl restart $SERVICE_NAME"; fi)
 TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
 TELEGRAM_CHAT_ID=${CHAT_ID}
 ALLOWED_USERS=${ALLOWED_USERS}
@@ -624,46 +752,59 @@ EOF
 chmod 600 "$ENV_FILE"
 ok "Env file -> $ENV_FILE (0600)"
 
-say "Writing systemd unit"
-sed \
-    -e "s|__REPLACE_USER__|${SERVICE_USER}|g" \
-    -e "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
-    -e "s|__REPLACE_ENV_FILE__|${ENV_FILE}|g" \
-    -e "s|__REPLACE_HOME__|${USER_HOME}|g" \
-    -e "s|__REPLACE_VAULT_PATH__|${VAULT_PATH}|g" \
-    "$REPO_DIR/systemd/${SERVICE_NAME}.service" > "$UNIT_DEST"
-chmod 644 "$UNIT_DEST"
-ok "Unit -> $UNIT_DEST"
+# ---------------------------------------------------------------------------
+# Write and start service
+# ---------------------------------------------------------------------------
+say "Writing service definition"
+if [[ $IS_MACOS -eq 1 ]]; then
+    sed \
+        -e "s|__REPLACE_USER__|${SERVICE_USER}|g" \
+        -e "s|__REPLACE_LAUNCHER__|${LAUNCHER_DEST}|g" \
+        "$REPO_DIR/launchd/com.trs0817.claude-code-telegram.plist" > "$UNIT_DEST"
+    chmod 644 "$UNIT_DEST"
+    ok "LaunchDaemon plist -> $UNIT_DEST"
+else
+    sed \
+        -e "s|__REPLACE_USER__|${SERVICE_USER}|g" \
+        -e "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
+        -e "s|__REPLACE_ENV_FILE__|${ENV_FILE}|g" \
+        -e "s|__REPLACE_HOME__|${USER_HOME}|g" \
+        -e "s|__REPLACE_VAULT_PATH__|${VAULT_PATH}|g" \
+        "$REPO_DIR/systemd/${SERVICE_NAME}.service" > "$UNIT_DEST"
+    chmod 644 "$UNIT_DEST"
+    ok "Unit -> $UNIT_DEST"
+fi
 
 say "Enabling and starting service"
-systemctl daemon-reload
-systemctl enable "$SERVICE_NAME" >/dev/null
-systemctl start "$SERVICE_NAME"
+svc_daemon_reload
+svc_enable
+svc_start
 
 sleep 2
-if systemctl is-active --quiet "$SERVICE_NAME"; then
+LOG_CMD=$(svc_log_cmd)
+if svc_active; then
     ok "$SERVICE_NAME is running"
     printf "\n${C_GREEN}${C_BOLD}  Installation complete!${C_RESET}\n\n"
-    printf "   Tail logs:   journalctl -u %s -f\n" "$SERVICE_NAME"
+    printf "   Tail logs:   %s\n" "$LOG_CMD"
+    printf "   Stop:        sudo %s\n" "$(if [[ $IS_MACOS -eq 1 ]]; then echo "launchctl unload $UNIT_DEST"; else echo "systemctl stop $SERVICE_NAME"; fi)"
     printf "   Update:      curl -sSL https://raw.githubusercontent.com/trs0817/claude-code-telegram/main/bootstrap.sh | bash -s -- --update\n"
     printf "   Uninstall:   sudo %s/scripts/uninstall.sh\n" "$REPO_DIR"
     printf "\n   You should receive an online message in Telegram shortly.\n\n"
 else
     warn "$SERVICE_NAME failed to start. Diagnosing..."
     printf "\n"
-    # Try to give targeted advice
-    JOURNAL=$(journalctl -u "$SERVICE_NAME" -n 30 --no-pager 2>/dev/null || true)
+    JOURNAL=$(svc_recent_logs)
     if echo "$JOURNAL" | grep -q "credentials"; then
         warn "Looks like a Claude auth issue."
         info "Run: sudo -u $SERVICE_USER -H $CLAUDE_BIN auth login"
-        info "Then: sudo systemctl restart $SERVICE_NAME"
+        info "Then restart the service."
     elif echo "$JOURNAL" | grep -q "BOT_TOKEN\|401\|Unauthorized"; then
         warn "Looks like an invalid bot token."
         info "Check your token in $ENV_FILE and restart."
     elif echo "$JOURNAL" | grep -q "ModuleNotFoundError\|No module"; then
         warn "Missing Python dependency."
         info "Run: pip3 install requests --break-system-packages"
-        info "Then: sudo systemctl restart $SERVICE_NAME"
+        info "Then restart the service."
     else
         warn "Recent logs:"
         echo "$JOURNAL" | tail -20
