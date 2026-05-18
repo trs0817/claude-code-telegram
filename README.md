@@ -1,25 +1,28 @@
 # claude-code-telegram
 
-> A Telegram bot that bridges your phone to the [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI running on a homelab server — with full project/vault context, conversation continuity, plan-before-execute safety, and push notifications.
+> Your [Obsidian](https://obsidian.md/) vault and homelab server, in your pocket — powered by the [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/trs0817/claude-code-telegram/actions/workflows/ci.yml/badge.svg)](https://github.com/trs0817/claude-code-telegram/actions/workflows/ci.yml)
 [![systemd](https://img.shields.io/badge/systemd-ready-green.svg)](systemd/)
+[![macOS](https://img.shields.io/badge/macOS-launchd-blue.svg)](launchd/)
 
 ---
 
 ## What it is
 
-Every Telegram message becomes a `claude -p <prompt>` invocation in your project directory on the server. The bot is **not** a wrapper around the Claude API — it shells out to the real `claude` CLI. That means everything Claude Code does natively — vault skills, slash commands, hooks, `settings.json`, project memory — works without re-implementation.
+If you use [Obsidian](https://obsidian.md/) with Claude Code — custom skills, slash commands, project memory, a second brain that Claude can read and write — this gives you all of that from your phone, over Telegram. Send a message, get a response, approve a file edit, trigger a vault skill. No context is lost: Claude runs directly in your vault directory, the same way it does in your terminal.
 
-In **safe mode** (default), Claude describes its plan before touching anything. You approve with `/go` or abort with `/cancel`. Flip to **unrestricted mode** (or use `/trust`) when you know what you're asking for.
+The bot is not a wrapper around the Claude API. It shells out to the real `claude` CLI, which means everything that works locally — `.claude/commands/`, `CLAUDE.md`, hooks, `settings.json` — works over Telegram without any re-implementation.
 
-Push notifications go the other way too: any script on your server can call `claude-notify "message"` to ping you on Telegram.
+In **safe mode** (default), Claude describes its plan before touching anything. You approve with `/go` or abort with `/cancel`. Use `/trust` to skip the plan step for the session when you know what you're asking for.
+
+Push notifications go the other way too: any script or cron job on your server can call `claude-notify "message"` to ping you on Telegram.
 
 ## Quick start
 
-Prerequisites: a Linux server with systemd, Python 3.9+, and [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and authenticated.
+Prerequisites: Linux (systemd) or macOS (launchd), Python 3.9+, and [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and authenticated.
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/trs0817/claude-code-telegram/main/bootstrap.sh | bash

@@ -9,7 +9,7 @@ Architecture:
 
 Features:
   - Message queue: messages pile up while Claude is thinking
-  - Plan-before-execute: unrestricted mode shows Claude's plan first
+  - Plan-before-execute: safe mode shows Claude's plan first
   - /trust: skip plan confirmations for the rest of the session
   - /new: reset session and trust state
   - /status: show current bot state
@@ -129,6 +129,7 @@ class SessionState:
         self.last_prompt: Optional[str] = None
         self.last_chat_id: Optional[str] = None
         # Pending plan awaiting /go or /cancel
+        # Keys: prompt, chat_id, plan (the plan text shown to the user)
         self.pending_action: Optional[Dict[str, str]] = None
         # Overflow chunks waiting for /more
         self.pending_chunks: List[str] = []
@@ -262,6 +263,97 @@ def send_chunked(text: str, chat_id: Optional[str] = None) -> None:
         send_message(overflow, parse_mode=parse_mode, chat_id=chat_id)
 
 # ---------------------------------------------------------------------------
+# Prompt construction — prompting best practices
+# ---------------------------------------------------------------------------
+
+# Action verbs whose presence in the opening words suggests a write/modify task.
+# Used to decide whether to prepend a "think step-by-step" instruction.
+_ACTION_WORDS = frozenset({
+    "add", "build", "change", "configure", "convert", "create", "debug",
+    "delete", "deploy", "edit", "execute", "fix", "generate", "implement",
+    "install", "make", "migrate", "modify", "move", "patch", "refactor",
+    "remove", "rename", "restart", "rewrite", "run", "set", "setup",
+    "start", "update", "write",
+})
+
+
+def _is_action_prompt(prompt: str) -> bool:
+    """
+    Heuristic: does this prompt ask Claude to DO something rather than explain?
+    Checks the first five words for action verbs, or falls back to length.
+    """
+    first_five = set(prompt.lower().split()[:5])
+    return bool(first_five & _ACTION_WORDS) or len(prompt.split()) > 25
+
+
+def _wrap_prompt(
+    prompt: str,
+    plan_only: bool = False,
+    approved_plan: Optional[str] = None,
+    is_first_message: bool = False,
+) -> str:
+    """
+    Apply prompting best practices before sending to the Claude CLI.
+
+    Principles applied:
+    - Role/context framing on the first message (avoids redundancy in sessions)
+    - "Think step-by-step" for action-oriented requests (leverages reasoning)
+    - Explicit, structured output format for planning requests
+    - Approved-plan context included verbatim on post-/go execution so Claude
+      doesn't re-plan or second-guess what was already reviewed
+    - Response format guidance when plain text is configured
+
+    The wrapper is kept intentionally lightweight — it informs Claude's approach
+    without drowning the user's actual intent.
+    """
+    fmt = str(CONFIG["RESPONSE_FMT"])
+
+    # --- Plan-only request -------------------------------------------------
+    if plan_only:
+        return (
+            "Think step-by-step, then provide a concise plan:\n"
+            "1. What you will do\n"
+            "2. Which files you will read or modify (with paths)\n"
+            "3. Any risks or side effects\n\n"
+            "Do NOT make any changes yet — describe only.\n\n"
+            f"Request: {prompt}"
+        )
+
+    # --- Execute after approved plan ---------------------------------------
+    if approved_plan:
+        return (
+            "The following plan has been reviewed and approved by the user. "
+            "Execute it now without re-planning.\n\n"
+            f"<approved_plan>\n{approved_plan}\n</approved_plan>\n\n"
+            f"<original_request>\n{prompt}\n</original_request>"
+        )
+
+    # --- Normal execution --------------------------------------------------
+    parts: List[str] = []
+
+    # Role context: only on fresh sessions to avoid token waste in long threads
+    if is_first_message:
+        parts.append(
+            "You are running as a homelab assistant accessed via Telegram. "
+            "Consult CLAUDE.md and any .claude/commands/ files in this project "
+            "for conventions before acting.\n\n"
+        )
+
+    # Think-first instruction for writes/complex tasks
+    if _is_action_prompt(prompt):
+        parts.append(
+            "Think step-by-step before making changes. "
+            "Consider edge cases and verify the result.\n\n"
+        )
+
+    parts.append(prompt)
+
+    if fmt == "plain":
+        parts.append("\n\nRespond in plain text without markdown formatting.")
+
+    return "".join(parts)
+
+# ---------------------------------------------------------------------------
 # Claude invocation
 # ---------------------------------------------------------------------------
 
@@ -269,17 +361,23 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+# Public aliases used by tests and external callers
+strip_ansi = _strip_ansi
+chunk_text = _chunk_text
+
 def _build_cmd(prompt: str, plan_only: bool = False) -> List[str]:
     """Build the claude CLI invocation for the configured session and permission mode."""
     base = [str(CONFIG["CLAUDE_BIN"])]
 
     if plan_only:
+        # Plan step: read-only inspection, no session continuity needed
         perm_flags = ["--permission-mode", "plan"]
         session_flags: List[str] = []
     else:
         if CONFIG["PERMISSION_MODE"] == "unrestricted":
             perm_flags = ["--dangerously-skip-permissions"]
         else:
+            # safe mode (with or without trust) — file edits allowed, no shell
             perm_flags = ["--permission-mode", "acceptEdits"]
 
         mode = CONFIG["SESSION_MODE"]
@@ -293,8 +391,7 @@ def _build_cmd(prompt: str, plan_only: bool = False) -> List[str]:
     return base + perm_flags + session_flags + ["-p", prompt]
 
 
-def run_claude(prompt: str,
-               plan_only: bool = False) -> tuple:
+def run_claude(prompt: str, plan_only: bool = False) -> tuple:
     """
     Invoke the Claude CLI and return (stdout, error_message).
 
@@ -318,9 +415,7 @@ def run_claude(prompt: str,
                 and result.returncode != 0
                 and not stdout):
             log.info("--continue failed (rc=%s); retrying without it", result.returncode)
-            fallback_cmd = _build_cmd(prompt, plan_only=False)
-            # Remove --continue for the retry
-            fallback_cmd = [c for c in fallback_cmd if c != "--continue"]
+            fallback_cmd = [c for c in _build_cmd(prompt) if c != "--continue"]
             result = subprocess.run(
                 fallback_cmd, cwd=work_dir, capture_output=True, text=True,
                 timeout=int(str(CONFIG["TIMEOUT"])),
@@ -450,10 +545,11 @@ def handle_new(_args: str, chat_id: str) -> None:
 
 
 def handle_trust(args: str, chat_id: str) -> None:
-    if CONFIG["PERMISSION_MODE"] != "unrestricted":
+    # Trust mode skips the plan step in safe permission mode.
+    # In unrestricted mode there is no plan step, so trust is not applicable.
+    if CONFIG["PERMISSION_MODE"] == "unrestricted":
         send_message(
-            "ℹ️ Trust mode only applies in unrestricted permission mode. "
-            "Your bot runs in safe mode — no plan step is shown anyway.",
+            "ℹ️ Already in unrestricted mode — there is no plan step to skip.",
             chat_id=chat_id,
         )
         return
@@ -465,10 +561,10 @@ def handle_trust(args: str, chat_id: str) -> None:
         _state.trust_mode = True
         pm = _parse_mode()
         if pm:
-            msg = ("Trust mode *on* - plan step skipped for this session.\n"
-                   "Send `/trust off` or `/new` to re-enable.")
+            msg = ("⚡ Trust mode *on* — plan step skipped for this session.\n"
+                   "Send `/trust off` or `/new` to re-enable confirmation.")
         else:
-            msg = "Trust mode on. Send /trust off or /new to re-enable."
+            msg = "Trust mode on. Send /trust off or /new to re-enable confirmation."
         send_message(msg, parse_mode=pm, chat_id=chat_id)
 
 
@@ -488,9 +584,10 @@ def handle_go(_args: str, chat_id: str) -> None:
         send_message("This plan belongs to a different user.", chat_id=chat_id)
         return
     prompt = _state.pending_action["prompt"]
+    approved_plan = _state.pending_action.get("plan")  # pass plan context to execution
     _state.pending_action = None
-    send_message("Executing...", chat_id=chat_id)
-    _execute_prompt(prompt, chat_id, skip_plan=True)
+    send_message("⚙️ Executing...", chat_id=chat_id)
+    _execute_prompt(prompt, chat_id, skip_plan=True, approved_plan=approved_plan)
 
 
 def handle_cancel(_args: str, chat_id: str) -> None:
@@ -498,7 +595,7 @@ def handle_cancel(_args: str, chat_id: str) -> None:
         send_message("No pending plan to cancel.", chat_id=chat_id)
         return
     _state.pending_action = None
-    send_message("Cancelled.", chat_id=chat_id)
+    send_message("❌ Cancelled.", chat_id=chat_id)
 
 
 def handle_more(_args: str, chat_id: str) -> None:
@@ -541,38 +638,68 @@ _COMMANDS: Dict[str, Callable[[str, str], None]] = {
 # Core execution logic
 # ---------------------------------------------------------------------------
 
-def _execute_prompt(prompt: str, chat_id: str, skip_plan: bool = False) -> None:
+def _execute_prompt(
+    prompt: str,
+    chat_id: str,
+    skip_plan: bool = False,
+    approved_plan: Optional[str] = None,
+) -> None:
     """
     Run Claude for a user prompt and send the response.
-    In unrestricted mode (without trust or skip_plan), runs plan-first flow.
+
+    Flow:
+      safe mode + trust=False + skip_plan=False  → plan first, then wait for /go
+      safe mode + trust=True  OR skip_plan=True  → execute immediately (acceptEdits)
+      unrestricted mode                          → execute immediately (skip-permissions)
+
     Called exclusively from the worker thread.
     """
     _state.last_prompt = prompt
     _state.last_chat_id = chat_id
     _state.msg_count += 1
-    pm = _parse_mode()
 
+    # True when Claude is starting fresh (no conversation history to rely on)
+    is_first = (
+        _state.msg_count == 1
+        or CONFIG["SESSION_MODE"] == "stateless"
+    )
+
+    # Determine whether to run the plan step first.
+    # safe mode = plan required unless trust is on or caller already approved.
     needs_plan = (
-        CONFIG["PERMISSION_MODE"] == "unrestricted"
+        CONFIG["PERMISSION_MODE"] == "safe"
         and not _state.trust_mode
         and not skip_plan
     )
 
     if needs_plan:
         _send_typing(chat_id)
-        plan_out, plan_err = run_claude(prompt, plan_only=True)
+        plan_prompt = _wrap_prompt(prompt, plan_only=True)
+        plan_out, plan_err = run_claude(plan_prompt, plan_only=True)
         if plan_err:
             send_message(f"Plan step failed: {plan_err}", chat_id=chat_id)
             return
-        header = "Claude's plan:\n\n"
+        pm = _parse_mode()
         footer = ("\n\nReply `/go` to execute or `/cancel` to abort." if pm
                   else "\n\nReply /go to execute or /cancel to abort.")
-        send_chunked(header + (plan_out or "") + footer, chat_id=chat_id)
-        _state.pending_action = {"prompt": prompt, "chat_id": chat_id}
+        send_chunked("Claude's plan:\n\n" + (plan_out or "") + footer, chat_id=chat_id)
+        # Store prompt AND plan so /go can include both as execution context
+        _state.pending_action = {
+            "prompt": prompt,
+            "chat_id": chat_id,
+            "plan": plan_out or "",
+        }
         return
 
+    # Wrap prompt with best-practice structure before execution
+    wrapped = _wrap_prompt(
+        prompt,
+        approved_plan=approved_plan,
+        is_first_message=is_first,
+    )
+
     _send_typing(chat_id)
-    output, err = run_claude(prompt)
+    output, err = run_claude(wrapped)
     if err:
         send_message(f"Error: {err}", chat_id=chat_id)
     else:
@@ -602,7 +729,7 @@ def _route(chat_id: str, text: str) -> None:
 def _worker() -> None:
     """
     Single worker thread. Dequeues and processes one message at a time.
-    All state mutations happen here - no locking required.
+    All state mutations happen here — no locking required.
     """
     while True:
         chat_id, text = _msg_queue.get()
