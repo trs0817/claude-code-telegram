@@ -364,27 +364,54 @@ if [[ $HAS_CURL -eq 1 ]]; then
     read -r manual_id </dev/tty
 
     if [[ -z "$manual_id" ]]; then
-        printf "   Fetching..." >/dev/tty
-        TG_RESP=$(curl -s --max-time 10 \
-            "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" 2>/dev/null || true)
-        FETCHED_ID=$(python3 -c "
+        printf "   Waiting a moment for Telegram to register your message..." >/dev/tty
+        sleep 2
+
+        # Try up to 3 times in case the update hasn't propagated yet
+        FETCHED_ID=""
+        for _attempt in 1 2 3; do
+            TG_RESP=$(curl -s --max-time 10 \
+                "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" 2>/dev/null || true)
+
+            FETCHED_ID=$(python3 -c "
 import sys, json
 try:
     data = json.loads(sys.stdin.read())
-    results = data.get('result', [])
-    if results:
-        print(results[-1]['message']['chat']['id'])
-except Exception:
-    pass
-" <<< "$TG_RESP" 2>/dev/null || true)
+    if not data.get('ok'):
+        sys.stderr.write('API error: ' + str(data.get('description', data)) + '\n')
+        sys.exit(1)
+    # Accept any update type that carries a chat object
+    for upd in reversed(data.get('result', [])):
+        for key in ('message', 'channel_post', 'edited_message', 'edited_channel_post', 'my_chat_member'):
+            obj = upd.get(key, {})
+            chat_id = obj.get('chat', {}).get('id') if obj else None
+            if chat_id is not None:
+                print(chat_id)
+                sys.exit(0)
+except Exception as e:
+    sys.stderr.write(str(e) + '\n')
+" <<< "$TG_RESP" 2>/dev/tty || true)
+
+            if [[ -n "$FETCHED_ID" ]]; then
+                break
+            fi
+            [[ $_attempt -lt 3 ]] && sleep 2
+        done
 
         if [[ -n "$FETCHED_ID" ]]; then
             printf " found!\n" >/dev/tty
             ok "Chat ID: $FETCHED_ID"
             CHAT_ID="$FETCHED_ID"
         else
-            printf " no messages found.\n" >/dev/tty
-            warn "Could not auto-fetch. Make sure you sent a message to your bot first."
+            printf "\n" >/dev/tty
+            warn "Auto-fetch came back empty after 3 tries."
+            info "Common reasons:"
+            info "  1. The message was sent before the bot token was set up"
+            info "  2. The old bot already consumed the update -- send another message"
+            info "  3. Wrong bot token"
+            info ""
+            info "Find your ID manually: https://api.telegram.org/bot${BOT_TOKEN}/getUpdates"
+            info "(open that URL in a browser after sending the bot a message)"
         fi
     else
         CHAT_ID="$manual_id"
@@ -618,7 +645,6 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     ok "$SERVICE_NAME is running"
     printf "\n${C_GREEN}${C_BOLD}  Installation complete!${C_RESET}\n\n"
     printf "   Tail logs:   journalctl -u %s -f\n" "$SERVICE_NAME"
-    printf "   Stop:        sudo systemctl stop %s\n" "$SERVICE_NAME"
     printf "   Update:      curl -sSL https://raw.githubusercontent.com/trs0817/claude-code-telegram/main/bootstrap.sh | bash -s -- --update\n"
     printf "   Uninstall:   sudo %s/scripts/uninstall.sh\n" "$REPO_DIR"
     printf "\n   You should receive an online message in Telegram shortly.\n\n"
