@@ -30,7 +30,7 @@ while IFS='=' read -r key value; do
     key="${key// /}"
     value="${value%%#*}"
     value="${value%"${value##*[^[:space:]]}"}"
-    [[ -n "$key" ]] && export "$key"="$value"
+    [[ -n "$key" ]] && declare -x "${key}=${value}"
 done < "$ENV_FILE"
 
 exec python3 __REPLACE_SCRIPT_PATH__

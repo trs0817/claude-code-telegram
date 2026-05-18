@@ -133,7 +133,8 @@ get_user_home() {
     if [[ $IS_MACOS -eq 1 ]]; then
         dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null \
             | awk '{print $2}' \
-            || eval echo "~$user"
+            || python3 -c "import pwd; print(pwd.getpwnam('${user}').pw_dir)" 2>/dev/null \
+            || echo "/Users/${user}"
     else
         getent passwd "$user" | cut -d: -f6
     fi
@@ -174,7 +175,9 @@ svc_daemon_reload() {
 }
 
 svc_reset_failed() {
-    [[ $IS_MACOS -eq 0 ]] && systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+    if [[ $IS_MACOS -eq 0 ]]; then
+        systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+    fi
 }
 
 svc_log_cmd() {
