@@ -51,48 +51,49 @@ die()    { printf "\n${C_RED}✗  %s${C_RESET}\n" "$*" >&2; exit 1; }
 header() { printf "\n${C_BOLD}${C_CYAN}%s${C_RESET}\n%s\n" "$*" "$(printf '─%.0s' {1..50})"; }
 
 ask() {
+    # All prompts go to /dev/tty so $() captures only the return value.
     local prompt="$1" default="${2:-}" var
     if [[ -n "$default" ]]; then
-        printf "   %s ${C_DIM}[%s]${C_RESET}: " "$prompt" "$default"
-        read -r var
+        printf "   %s ${C_DIM}[%s]${C_RESET}: " "$prompt" "$default" >/dev/tty
+        read -r var </dev/tty
         echo "${var:-$default}"
     else
-        printf "   %s: " "$prompt"
-        read -r var
+        printf "   %s: " "$prompt" >/dev/tty
+        read -r var </dev/tty
         echo "$var"
     fi
 }
 
 ask_secret() {
     local prompt="$1" var
-    printf "   %s: " "$prompt"
-    read -rsp "" var
-    echo
+    printf "   %s: " "$prompt" >/dev/tty
+    read -rsp "" var </dev/tty
+    echo >/dev/tty
     echo "$var"
 }
 
 pick() {
     # pick <prompt> <option1> <option2> ...
-    # Prints the chosen option. Default is option1.
+    # All output goes to /dev/tty; only the chosen option string goes to stdout.
     local prompt="$1"; shift
     local options=("$@")
     local default="${options[0]}"
     local i choice
 
-    printf "   %s\n" "$prompt"
+    printf "   %s\n" "$prompt" >/dev/tty
     for i in "${!options[@]}"; do
         local marker=""
         [[ $i -eq 0 ]] && marker=" ${C_DIM}(default)${C_RESET}"
-        printf "   ${C_BOLD}%d)${C_RESET} %s%s\n" "$((i+1))" "${options[$i]}" "$marker"
+        printf "   ${C_BOLD}%d)${C_RESET} %s%s\n" "$((i+1))" "${options[$i]}" "$marker" >/dev/tty
     done
-    printf "   Choice [1]: "
-    read -r choice
+    printf "   Choice [1]: " >/dev/tty
+    read -r choice </dev/tty
     choice="${choice:-1}"
 
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
         echo "${options[$((choice-1))]}"
     else
-        warn "Invalid choice, using default: $default"
+        warn "Invalid choice, using default: $default" >/dev/tty
         echo "$default"
     fi
 }
