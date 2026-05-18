@@ -2,34 +2,37 @@
 #
 # claude-code-telegram installer
 #
-# Wizard-style setup: detects your vault, fetches your chat ID automatically,
-# walks you through session mode and response preferences, then deploys and
-# starts the systemd service.
-#
-# Typically invoked by bootstrap.sh (curl | bash), but can be run directly:
-#   sudo ./scripts/install.sh
+# Usage:
+#   sudo ./scripts/install.sh            # normal install
+#   sudo ./scripts/install.sh --dry-run  # preview without writing anything
+#   sudo ./scripts/install.sh --update   # update an existing install
 #
 # Repository: https://github.com/trs0817/claude-code-telegram
 # License: MIT
 
 set -euo pipefail
 
-# ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Flags
-# ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 DRY_RUN=0
+UPDATE=0
 for arg in "$@"; do
     [[ "$arg" == "--dry-run" ]] && DRY_RUN=1
+    [[ "$arg" == "--update"  ]] && UPDATE=1
 done
 
-# ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Constants
-# ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE_NAME="claude-code-telegram"
 INSTALL_DIR="/opt/claude-code-telegram"
 SCRIPT_DEST="${INSTALL_DIR}/claude_telegram_bot.py"
+NOTIFY_DEST="/usr/local/bin/claude-notify"
 UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
+ENV_FILE="/etc/claude-code-telegram.env"
+OBSIDIAN_REPO="https://github.com/AgriciDaniel/claude-obsidian"
 
 C_RESET=$'\033[0m'
 C_BOLD=$'\033[1m'
@@ -40,18 +43,21 @@ C_YELLOW=$'\033[33m'
 C_BLUE=$'\033[34m'
 C_CYAN=$'\033[36m'
 
-# ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Helpers
-# ────────────────────────────────────────────────
-say()    { printf "\n${C_BLUE}▶${C_RESET}  %s\n" "$*"; }
-ok()     { printf "${C_GREEN}✓${C_RESET}  %s\n" "$*"; }
-warn()   { printf "${C_YELLOW}!${C_RESET}  %s\n" "$*"; }
+# ---------------------------------------------------------------------------
+say()    { printf "\n${C_BLUE}%s${C_RESET}  %s\n" ">" "$*"; }
+ok()     { printf "${C_GREEN}%s${C_RESET}  %s\n" "v" "$*"; }
+warn()   { printf "${C_YELLOW}%s${C_RESET}  %s\n" "!" "$*"; }
 info()   { printf "   ${C_DIM}%s${C_RESET}\n" "$*"; }
-die()    { printf "\n${C_RED}✗  %s${C_RESET}\n" "$*" >&2; exit 1; }
-header() { printf "\n${C_BOLD}${C_CYAN}%s${C_RESET}\n%s\n" "$*" "$(printf '─%.0s' {1..50})"; }
+die()    { printf "\n${C_RED}%s  %s${C_RESET}\n" "x" "$*" >&2; exit 1; }
+header() {
+    printf "\n${C_BOLD}${C_CYAN}%s${C_RESET}\n" "$*"
+    printf '%s\n' "$(printf -- '-%.0s' {1..50})"
+}
 
 ask() {
-    # All prompts go to /dev/tty so $() captures only the return value.
+    # All prompts go to /dev/tty so $() captures only the return value
     local prompt="$1" default="${2:-}" var
     if [[ -n "$default" ]]; then
         printf "   %s ${C_DIM}[%s]${C_RESET}: " "$prompt" "$default" >/dev/tty
@@ -74,7 +80,7 @@ ask_secret() {
 
 pick() {
     # pick <prompt> <option1> <option2> ...
-    # All output goes to /dev/tty; only the chosen option string goes to stdout.
+    # All display goes to /dev/tty; only chosen string goes to stdout
     local prompt="$1"; shift
     local options=("$@")
     local default="${options[0]}"
@@ -93,118 +99,200 @@ pick() {
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
         echo "${options[$((choice-1))]}"
     else
-        warn "Invalid choice, using default: $default" >/dev/tty
+        warn "Invalid choice, using default." >/dev/tty
         echo "$default"
     fi
 }
 
 require_root() {
     if [[ $DRY_RUN -eq 1 ]]; then
-        warn "Dry-run mode — skipping root check (no files will be written)"
+        warn "Dry-run mode -- skipping root check (nothing will be written)"
         return
     fi
-    if [[ $EUID -ne 0 ]]; then
-        die "This installer must be run as root (use sudo)."
-    fi
+    [[ $EUID -eq 0 ]] || die "This installer must be run as root (use sudo)."
 }
 
-# ────────────────────────────────────────────────
-# Pre-flight checks
-# ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
 require_root
 
 printf "\n${C_BOLD}${C_CYAN}"
-printf "  ╔═══════════════════════════════════════╗\n"
-printf "  ║     claude-code-telegram installer    ║\n"
-[[ $DRY_RUN -eq 1 ]] && \
-printf "  ║          ⚠  DRY RUN — no changes  ⚠   ║\n"
-printf "  ╚═══════════════════════════════════════╝\n"
+printf "  +---------------------------------------+\n"
+printf "  |   claude-code-telegram installer      |\n"
+[[ $DRY_RUN -eq 1 ]] && printf "  |        DRY RUN -- no changes           |\n"
+[[ $UPDATE  -eq 1 ]] && printf "  |              UPDATE MODE               |\n"
+printf "  +---------------------------------------+\n"
 printf "${C_RESET}\n"
 
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
 say "Checking prerequisites"
 
 # Python 3.9+
-if ! command -v python3 >/dev/null 2>&1; then
-    die "python3 is required but not installed. Install it and re-run."
-fi
+command -v python3 >/dev/null 2>&1 || die "python3 is required but not installed."
 PY_VER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'; then
-    die "python3 ${PY_VER} is too old. Need 3.9+."
-fi
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
+    || die "python3 ${PY_VER} is too old. Need 3.9+."
 ok "python3 ${PY_VER}"
 
-# requests library
+# requests
 if ! python3 -c 'import requests' 2>/dev/null; then
-    warn "Python 'requests' not installed — installing now..."
+    warn "Python 'requests' not installed -- installing now..."
     pip3 install requests --break-system-packages 2>/dev/null \
         || pip3 install requests \
         || die "Failed to install 'requests'. Install manually and re-run."
 fi
 ok "python3 requests"
 
-# claude binary
-CLAUDE_BIN_FOUND=$(command -v claude || true)
-if [[ -n "$CLAUDE_BIN_FOUND" ]]; then
-    ok "claude binary at $CLAUDE_BIN_FOUND"
-else
-    warn "claude binary not found on PATH. You'll specify the path below."
-fi
-
 # systemd
-command -v systemctl >/dev/null 2>&1 || die "systemctl not found — systemd is required."
+command -v systemctl >/dev/null 2>&1 || die "systemctl not found -- systemd is required."
 ok "systemd available"
 
 # curl (used for chat ID auto-fetch)
 command -v curl >/dev/null 2>&1 && HAS_CURL=1 || HAS_CURL=0
 
-# ────────────────────────────────────────────────
-# Step 1 — Service user
-# ────────────────────────────────────────────────
-header "Step 1 of 7 — Service user"
-info "The bot runs as a non-root system user. It must be the same user"
-info "whose 'claude' credentials you want the bot to use."
+# claude binary
+CLAUDE_BIN_FOUND=$(command -v claude 2>/dev/null || true)
+if [[ -z "$CLAUDE_BIN_FOUND" ]]; then
+    printf "\n"
+    printf "${C_RED}  x  Claude Code not found on PATH.${C_RESET}\n"
+    printf "\n"
+    info "Install Claude Code first:"
+    info "  https://docs.claude.com/en/docs/claude-code"
+    info ""
+    info "Then authenticate:"
+    info "  claude auth login"
+    printf "\n"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        die "Claude Code must be installed before running this installer."
+    else
+        warn "Continuing dry-run without claude -- binary check will be skipped."
+        CLAUDE_BIN_FOUND=""
+    fi
+else
+    CLAUDE_VERSION=$(claude --version 2>/dev/null | head -1 || echo "unknown")
+    ok "Claude Code: $CLAUDE_VERSION at $CLAUDE_BIN_FOUND"
+fi
+
+# ---------------------------------------------------------------------------
+# Update mode: detect existing install
+# ---------------------------------------------------------------------------
+EXISTING_INSTALL=0
+if [[ -f "$ENV_FILE" ]]; then
+    EXISTING_INSTALL=1
+fi
+
+if [[ $UPDATE -eq 1 ]]; then
+    if [[ $EXISTING_INSTALL -eq 0 ]]; then
+        die "--update specified but no existing install found ($ENV_FILE missing)."
+    fi
+    say "Updating existing install"
+    install -d -m 755 "$INSTALL_DIR"
+    install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
+    ok "Bot script updated -> $SCRIPT_DEST"
+    install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
+    ok "claude-notify updated -> $NOTIFY_DEST"
+    systemctl daemon-reload
+    systemctl restart "$SERVICE_NAME"
+    sleep 2
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        ok "$SERVICE_NAME restarted successfully"
+    else
+        warn "Service failed to restart. Logs:"
+        journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+        exit 1
+    fi
+    printf "\n${C_GREEN}${C_BOLD}  Update complete!${C_RESET}\n\n"
+    exit 0
+fi
+
+if [[ $EXISTING_INSTALL -eq 1 ]] && [[ $DRY_RUN -eq 0 ]]; then
+    printf "\n"
+    warn "Existing installation detected ($ENV_FILE)."
+    REINSTALL_CHOICE=$(pick "What would you like to do?" \
+        "Reinstall -- keep existing config, just redeploy files" \
+        "Reconfigure -- walk through all setup steps again" \
+        "Cancel")
+    case "$REINSTALL_CHOICE" in
+        Reinstall*)
+            say "Reinstalling with existing config"
+            install -d -m 755 "$INSTALL_DIR"
+            install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
+            install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
+            systemctl daemon-reload
+            systemctl restart "$SERVICE_NAME" 2>/dev/null || systemctl start "$SERVICE_NAME"
+            ok "Reinstalled and restarted."
+            exit 0
+            ;;
+        Cancel*)
+            die "Aborted."
+            ;;
+        # Reconfigure falls through to full wizard
+    esac
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1 -- Service user
+# ---------------------------------------------------------------------------
+header "Step 1 of 8 -- Service user"
+info "The bot runs as a non-root system user."
+info "It must be the same user whose claude credentials you want to use."
 DEFAULT_USER=$(logname 2>/dev/null || echo "${SUDO_USER:-$USER}")
 SERVICE_USER=$(ask "Service user" "$DEFAULT_USER")
 id "$SERVICE_USER" >/dev/null 2>&1 || die "User '$SERVICE_USER' does not exist."
 USER_HOME=$(getent passwd "$SERVICE_USER" | cut -d: -f6)
 ok "Service user: $SERVICE_USER (home: $USER_HOME)"
 
-# ────────────────────────────────────────────────
-# Step 2 — Claude binary
-# ────────────────────────────────────────────────
-header "Step 2 of 7 — Claude binary"
-info "Systemd doesn't use your shell PATH, so we need the full path."
-CLAUDE_BIN=$(ask "Path to claude binary" "${CLAUDE_BIN_FOUND:-}")
+# ---------------------------------------------------------------------------
+# Step 2 -- Claude binary
+# ---------------------------------------------------------------------------
+header "Step 2 of 8 -- Claude Code"
+info "Systemd does not use your shell PATH, so we need the full binary path."
+CLAUDE_BIN=$(ask "Path to claude binary" "${CLAUDE_BIN_FOUND:-/usr/bin/claude}")
 [[ -x "$CLAUDE_BIN" ]] || die "Not executable: $CLAUDE_BIN"
-ok "Claude binary: $CLAUDE_BIN"
 
-# Auth check (skipped in dry-run — can't sudo as another user without root)
+CLAUDE_VER_CHECK=$(sudo -u "$SERVICE_USER" -H "$CLAUDE_BIN" --version 2>/dev/null | head -1 || true)
+if [[ -n "$CLAUDE_VER_CHECK" ]]; then
+    ok "Claude works for $SERVICE_USER: $CLAUDE_VER_CHECK"
+else
+    ok "Claude binary confirmed executable: $CLAUDE_BIN"
+fi
+
+# Auth check
 if [[ $DRY_RUN -eq 0 ]]; then
-    if ! sudo -u "$SERVICE_USER" -H test -f "$USER_HOME/.claude/.credentials.json" 2>/dev/null; then
-        printf "\n"
-        warn "Claude is not authenticated for user '$SERVICE_USER'."
-        warn "After install completes, run the following in another terminal:"
-        warn "    sudo -u $SERVICE_USER -H $CLAUDE_BIN"
-        warn "Complete the auth flow, then restart the service:"
-        warn "    sudo systemctl restart $SERVICE_NAME"
-        printf "\n"
-        read -rp "   Press Enter to continue... "
-    else
+    if sudo -u "$SERVICE_USER" -H test -f "$USER_HOME/.claude/.credentials.json" 2>/dev/null; then
         ok "Claude credentials found for $SERVICE_USER"
+    else
+        printf "\n"
+        warn "Claude is not authenticated for '$SERVICE_USER'."
+        warn "You have two options:"
+        info ""
+        info "Option A -- Browser auth (if this machine has a browser):"
+        info "  Open another terminal and run:"
+        info "    sudo -u $SERVICE_USER -H $CLAUDE_BIN auth login"
+        info ""
+        info "Option B -- API key (recommended for headless servers):"
+        info "  Add to $ENV_FILE after install:"
+        info "    ANTHROPIC_API_KEY=sk-ant-..."
+        info "  Get a key at: https://console.anthropic.com"
+        printf "\n"
+        read -rp "   Press Enter to continue (you can authenticate after install)... " </dev/tty
     fi
 else
     info "(dry-run) would check: $USER_HOME/.claude/.credentials.json"
 fi
 
-# ────────────────────────────────────────────────
-# Step 3 — Project directory (vault)
-# ────────────────────────────────────────────────
-header "Step 3 of 7 — Project directory"
+# ---------------------------------------------------------------------------
+# Step 3 -- Project directory (vault)
+# ---------------------------------------------------------------------------
+header "Step 3 of 8 -- Project directory"
 info "This is the working directory for all claude invocations."
 info "Typically your Obsidian vault or a code repository."
 info ""
 
-# Scan for .obsidian/ folders in common locations
+# Scan for .obsidian/ folders
 VAULT_CANDIDATES=()
 while IFS= read -r -d '' dir; do
     VAULT_CANDIDATES+=("$(dirname "$dir")")
@@ -215,20 +303,20 @@ for candidate in "$USER_HOME/notes" "$USER_HOME/Notes" "$USER_HOME/Documents/not
 done
 
 # Deduplicate
-readarray -t VAULT_CANDIDATES < <(printf '%s\n' "${VAULT_CANDIDATES[@]}" | sort -u)
+readarray -t VAULT_CANDIDATES < <(printf '%s\n' "${VAULT_CANDIDATES[@]}" | sort -u 2>/dev/null || true)
 
 VAULT_DEFAULT="$USER_HOME/notes"
 if [[ ${#VAULT_CANDIDATES[@]} -eq 1 ]]; then
     VAULT_DEFAULT="${VAULT_CANDIDATES[0]}"
     info "Found vault: $VAULT_DEFAULT"
 elif [[ ${#VAULT_CANDIDATES[@]} -gt 1 ]]; then
-    info "Found multiple vaults:"
+    info "Found multiple candidates:"
     for i in "${!VAULT_CANDIDATES[@]}"; do
-        printf "   ${C_BOLD}%d)${C_RESET} %s\n" "$((i+1))" "${VAULT_CANDIDATES[$i]}"
+        printf "   ${C_BOLD}%d)${C_RESET} %s\n" "$((i+1))" "${VAULT_CANDIDATES[$i]}" >/dev/tty
     done
-    printf "   ${C_BOLD}%d)${C_RESET} Enter path manually\n" "$((${#VAULT_CANDIDATES[@]}+1))"
-    printf "   Choice [1]: "
-    read -r vchoice
+    printf "   ${C_BOLD}%d)${C_RESET} Enter path manually\n" "$((${#VAULT_CANDIDATES[@]}+1))" >/dev/tty
+    printf "   Choice [1]: " >/dev/tty
+    read -r vchoice </dev/tty
     vchoice="${vchoice:-1}"
     if [[ "$vchoice" =~ ^[0-9]+$ ]] && (( vchoice >= 1 && vchoice <= ${#VAULT_CANDIDATES[@]} )); then
         VAULT_DEFAULT="${VAULT_CANDIDATES[$((vchoice-1))]}"
@@ -239,32 +327,44 @@ VAULT_PATH=$(ask "Project directory" "$VAULT_DEFAULT")
 [[ -d "$VAULT_PATH" ]] || die "Directory does not exist: $VAULT_PATH"
 ok "Project directory: $VAULT_PATH"
 
-# ────────────────────────────────────────────────
-# Step 4 — Telegram bot token + chat ID
-# ────────────────────────────────────────────────
-header "Step 4 of 7 — Telegram credentials"
+# Suggest Obsidian setup if no .obsidian folder found
+if [[ ! -d "$VAULT_PATH/.obsidian" ]]; then
+    printf "\n"
+    info "Tip: For the best experience, use an Obsidian vault with Claude skills"
+    info "configured. If you want to set one up:"
+    info "  $OBSIDIAN_REPO"
+    info "You can change VAULT_PATH anytime by editing $ENV_FILE"
+    printf "\n"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4 -- Telegram credentials
+# ---------------------------------------------------------------------------
+header "Step 4 of 8 -- Telegram credentials"
 info "Get your bot token from @BotFather on Telegram."
 info ""
+
 BOT_TOKEN=""
 while [[ -z "$BOT_TOKEN" ]]; do
     BOT_TOKEN=$(ask_secret "Bot token (from @BotFather)")
-    [[ -z "$BOT_TOKEN" ]] && warn "Token cannot be empty — try again." >/dev/tty
+    [[ -z "$BOT_TOKEN" ]] && warn "Token cannot be empty -- try again." >/dev/tty
 done
-[[ "$BOT_TOKEN" =~ ^[0-9]+: ]] || warn "Token format looks unusual — double-check it."
+[[ "$BOT_TOKEN" =~ ^[0-9]+: ]] || warn "Token format looks unusual -- double-check it."
 
-printf "\n"
-info "Your chat ID is the number that identifies your conversation with the bot."
+# Chat ID auto-fetch
+printf "\n" >/dev/tty
+info "Your chat ID identifies your conversation with the bot."
 CHAT_ID=""
 
 if [[ $HAS_CURL -eq 1 ]]; then
-    printf "   ${C_BOLD}Auto-fetch chat ID?${C_RESET}\n"
-    info "Send any message to your bot on Telegram right now, then press Enter."
-    info "The installer will call getUpdates to find your ID automatically."
-    printf "   (Press Enter when ready, or type your chat ID manually): "
-    read -r manual_id
+    printf "   ${C_BOLD}Auto-fetch chat ID${C_RESET}\n" >/dev/tty
+    info "Send any message to your bot on Telegram now, then press Enter."
+    info "Or type your chat ID manually and press Enter."
+    printf "   (Enter to auto-fetch, or type ID): " >/dev/tty
+    read -r manual_id </dev/tty
 
     if [[ -z "$manual_id" ]]; then
-        printf "   Fetching from Telegram..."
+        printf "   Fetching..." >/dev/tty
         TG_RESP=$(curl -s --max-time 10 \
             "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" 2>/dev/null || true)
         FETCHED_ID=$(python3 -c "
@@ -279,11 +379,11 @@ except Exception:
 " <<< "$TG_RESP" 2>/dev/null || true)
 
         if [[ -n "$FETCHED_ID" ]]; then
-            printf " ${C_GREEN}found!${C_RESET}\n"
+            printf " found!\n" >/dev/tty
             ok "Chat ID: $FETCHED_ID"
             CHAT_ID="$FETCHED_ID"
         else
-            printf " ${C_YELLOW}no messages found.${C_RESET}\n"
+            printf " no messages found.\n" >/dev/tty
             warn "Could not auto-fetch. Make sure you sent a message to your bot first."
         fi
     else
@@ -291,120 +391,157 @@ except Exception:
     fi
 fi
 
-if [[ -z "$CHAT_ID" ]]; then
-    info "Find your chat ID by visiting:"
-    info "  https://api.telegram.org/bot<TOKEN>/getUpdates"
-    info "after sending any message to your bot."
-    while true; do
-        CHAT_ID=$(ask "Telegram chat ID (numeric)")
-        [[ "$CHAT_ID" =~ ^-?[0-9]+$ ]] && break
-        warn "Must be a number — try again." >/dev/tty
-    done
-fi
-
-[[ "$CHAT_ID" =~ ^-?[0-9]+$ ]] || { warn "Must be a number — try again." >/dev/tty; CHAT_ID=$(ask "Telegram chat ID (numeric)"); }
+while [[ -z "$CHAT_ID" ]] || ! [[ "$CHAT_ID" =~ ^-?[0-9]+$ ]]; do
+    [[ -n "$CHAT_ID" ]] && warn "Must be a number -- try again." >/dev/tty
+    info "Find it at: https://api.telegram.org/bot<TOKEN>/getUpdates"
+    CHAT_ID=$(ask "Telegram chat ID (numeric)")
+done
 ok "Chat ID: $CHAT_ID"
 
-# ────────────────────────────────────────────────
-# Step 5 — Session mode
-# ────────────────────────────────────────────────
-header "Step 5 of 7 — Conversation memory (session mode)"
+# Additional allowed users
+printf "\n"
+info "You can allow additional users to use the bot (comma-separated chat IDs)."
+info "Leave blank for single-user (just you)."
+EXTRA_USERS=$(ask "Additional allowed user IDs" "")
+if [[ -n "$EXTRA_USERS" ]]; then
+    ALLOWED_USERS="${CHAT_ID},${EXTRA_USERS}"
+else
+    ALLOWED_USERS="$CHAT_ID"
+fi
+ok "Allowed users: $ALLOWED_USERS"
+
+# ---------------------------------------------------------------------------
+# Step 5 -- Session mode
+# ---------------------------------------------------------------------------
+header "Step 5 of 8 -- Conversation memory"
 info "How should the bot maintain context between your messages?"
 info ""
 
 SESSION_MODE_CHOICE=$(pick "Choose session mode:" \
-    "threaded — messages continue each other (shares your terminal session)" \
-    "dedicated — bot keeps its own isolated session (no bleed with terminal use)" \
-    "stateless — each message is a fresh, independent context")
+    "threaded -- messages continue each other (shares your terminal session)" \
+    "dedicated -- bot keeps its own isolated session (no bleed with terminal)" \
+    "stateless -- each message is a fresh independent context")
 
 if [[ "$SESSION_MODE_CHOICE" == threaded* ]]; then
-    SESSION_MODE="threaded"
-    SESSION_ID=""
+    SESSION_MODE="threaded"; SESSION_ID=""
 elif [[ "$SESSION_MODE_CHOICE" == dedicated* ]]; then
     SESSION_MODE="dedicated"
     SESSION_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
-    ok "Generated dedicated session ID: $SESSION_ID"
+    ok "Generated dedicated session ID: ${SESSION_ID:0:8}..."
 else
-    SESSION_MODE="stateless"
-    SESSION_ID=""
+    SESSION_MODE="stateless"; SESSION_ID=""
 fi
 ok "Session mode: $SESSION_MODE"
 
-# ────────────────────────────────────────────────
-# Step 6 — Response format
-# ────────────────────────────────────────────────
-header "Step 6 of 7 — Response format"
-info "How should the bot format claude's replies in Telegram?"
+# ---------------------------------------------------------------------------
+# Step 6 -- Permission mode
+# ---------------------------------------------------------------------------
+header "Step 6 of 8 -- Permission mode"
+info "How should claude handle tool use (bash commands, file writes, etc.)?"
+info ""
+
+PERM_CHOICE=$(pick "Choose permission mode:" \
+    "safe -- file edits auto-approved; bash commands may be blocked (recommended)" \
+    "unrestricted -- all operations auto-approved; shows plan first for review")
+
+if [[ "$PERM_CHOICE" == safe* ]]; then
+    PERMISSION_MODE="safe"
+else
+    PERMISSION_MODE="unrestricted"
+    printf "\n"
+    warn "Unrestricted mode: Claude will show its plan before executing."
+    info "Send /trust to skip the plan step for a session."
+    info "Only use this mode on a server you control with a private bot token."
+fi
+ok "Permission mode: $PERMISSION_MODE"
+
+# ---------------------------------------------------------------------------
+# Step 7 -- Response format
+# ---------------------------------------------------------------------------
+header "Step 7 of 8 -- Response format"
 info ""
 
 FMT_CHOICE=$(pick "Choose response format:" \
-    "markdown — bold, code blocks, italic rendered by Telegram" \
-    "plain — raw text, no formatting (safer if responses contain lots of code)")
+    "markdown -- bold, code blocks, italic rendered by Telegram (recommended)" \
+    "plain -- raw text, no formatting")
 
-if [[ "$FMT_CHOICE" == markdown* ]]; then
-    RESPONSE_FORMAT="markdown"
-else
-    RESPONSE_FORMAT="plain"
-fi
+RESPONSE_FORMAT="markdown"
+[[ "$FMT_CHOICE" == plain* ]] && RESPONSE_FORMAT="plain"
 ok "Response format: $RESPONSE_FORMAT"
 
-# ────────────────────────────────────────────────
-# Step 7 — Typing indicator
-# ────────────────────────────────────────────────
-header "Step 7 of 7 — Typing indicator"
-info "Show animated '...' in Telegram while claude is thinking?"
+# ---------------------------------------------------------------------------
+# Step 8 -- Typing indicator
+# ---------------------------------------------------------------------------
+header "Step 8 of 8 -- Typing indicator"
 info ""
 
-TYPING_CHOICE=$(pick "Typing indicator:" \
-    "on — show typing animation while claude works" \
-    "off — silent until the response arrives")
+TYPING_CHOICE=$(pick "Show typing animation while Claude thinks?" \
+    "on -- show animated dots while Claude works (recommended)" \
+    "off -- silent until response arrives")
 
-if [[ "$TYPING_CHOICE" == on* ]]; then
-    TYPING_INDICATOR="1"
-else
-    TYPING_INDICATOR="0"
-fi
+TYPING_INDICATOR="1"
+[[ "$TYPING_CHOICE" == off* ]] && TYPING_INDICATOR="0"
 ok "Typing indicator: $TYPING_CHOICE"
 
-# ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Run a test invocation (skip in dry-run)
+# ---------------------------------------------------------------------------
+if [[ $DRY_RUN -eq 0 ]] && [[ -n "$CLAUDE_BIN_FOUND" ]]; then
+    say "Testing Claude invocation"
+    info "Running a quick test in $VAULT_PATH ..."
+    TEST_OUT=$(sudo -u "$SERVICE_USER" -H \
+        "$CLAUDE_BIN" --permission-mode acceptEdits -p "Reply with only the word: OK" \
+        --no-session-persistence 2>/dev/null \
+        | tr -d '\n' | head -c 20 || true)
+    if echo "$TEST_OUT" | grep -qi "ok"; then
+        ok "Claude responded correctly"
+    else
+        warn "Unexpected test response: '${TEST_OUT}'"
+        warn "Claude may not be authenticated. The service will start, but"
+        warn "commands may fail until auth is complete."
+        read -rp "   Continue anyway? [y/N] " cont </dev/tty
+        [[ "${cont:-n}" =~ ^[Yy]$ ]] || die "Aborted."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
-# ────────────────────────────────────────────────
-printf "\n${C_BOLD}${C_CYAN}── Summary ─────────────────────────────────────${C_RESET}\n"
+# ---------------------------------------------------------------------------
+printf "\n${C_BOLD}${C_CYAN}-- Summary $(printf -- '-%.0s' {1..38})${C_RESET}\n"
 printf "   %-22s %s\n" "Service user:"      "$SERVICE_USER"
 printf "   %-22s %s\n" "Project directory:" "$VAULT_PATH"
 printf "   %-22s %s\n" "Claude binary:"     "$CLAUDE_BIN"
-printf "   %-22s %s\n" "Chat ID:"           "$CHAT_ID"
+printf "   %-22s %s\n" "Allowed users:"     "$ALLOWED_USERS"
 printf "   %-22s %s\n" "Session mode:"      "$SESSION_MODE"
 [[ -n "$SESSION_ID" ]] && printf "   %-22s %s\n" "Session ID:" "${SESSION_ID:0:8}...${SESSION_ID: -8}"
+printf "   %-22s %s\n" "Permission mode:"   "$PERMISSION_MODE"
 printf "   %-22s %s\n" "Response format:"   "$RESPONSE_FORMAT"
 printf "   %-22s %s\n" "Typing indicator:"  "$([[ $TYPING_INDICATOR -eq 1 ]] && echo on || echo off)"
-printf "${C_BOLD}${C_CYAN}─────────────────────────────────────────────────${C_RESET}\n\n"
+printf "${C_BOLD}${C_CYAN}$(printf -- '-%.0s' {1..50})${C_RESET}\n\n"
 
 if [[ $DRY_RUN -eq 1 ]]; then
-    read -rp "   Review output? [Y/n] " confirm
+    read -rp "   Review generated files? [Y/n] " confirm </dev/tty
     [[ "${confirm:-y}" =~ ^[Nn]$ ]] && die "Aborted."
 else
-    read -rp "   Proceed with install? [y/N] " confirm
+    read -rp "   Proceed with install? [y/N] " confirm </dev/tty
     [[ "$confirm" =~ ^[Yy]$ ]] || die "Aborted."
 fi
 
-# ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Install (or dry-run preview)
-# ────────────────────────────────────────────────
-ENV_FILE="/etc/claude-code-telegram.env"
-
+# ---------------------------------------------------------------------------
 if [[ $DRY_RUN -eq 1 ]]; then
-    printf "\n${C_BOLD}${C_CYAN}── What would be written ────────────────────────${C_RESET}\n\n"
-
-    printf "${C_BOLD}%s${C_RESET}  (0600)\n" "$ENV_FILE"
-    printf "${C_DIM}%s${C_RESET}\n" "──────────────────────────────────────"
-    cat << EOF
+    printf "\n${C_BOLD}${C_CYAN}-- Generated: %s${C_RESET}\n" "$ENV_FILE"
+    printf '%s\n' "$(printf -- '-%.0s' {1..50})"
+    cat <<EOF
 TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
 TELEGRAM_CHAT_ID=${CHAT_ID}
+ALLOWED_USERS=${ALLOWED_USERS}
 VAULT_PATH=${VAULT_PATH}
 CLAUDE_BIN=${CLAUDE_BIN}
 SESSION_MODE=${SESSION_MODE}
 SESSION_ID=${SESSION_ID}
+PERMISSION_MODE=${PERMISSION_MODE}
 RESPONSE_FORMAT=${RESPONSE_FORMAT}
 TYPING_INDICATOR=${TYPING_INDICATOR}
 CLAUDE_TIMEOUT=90
@@ -412,8 +549,8 @@ MAX_CHUNKS=3
 CHUNK_SIZE=3800
 POLL_INTERVAL=2
 EOF
-    printf "\n${C_BOLD}%s${C_RESET}  (0644)\n" "$UNIT_DEST"
-    printf "${C_DIM}%s${C_RESET}\n" "--------------------------------------"
+    printf "\n${C_BOLD}${C_CYAN}-- Generated: %s${C_RESET}\n" "$UNIT_DEST"
+    printf '%s\n' "$(printf -- '-%.0s' {1..50})"
     sed \
         -e "s|__REPLACE_USER__|${SERVICE_USER}|g" \
         -e "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
@@ -421,32 +558,35 @@ EOF
         -e "s|__REPLACE_HOME__|${USER_HOME}|g" \
         -e "s|__REPLACE_VAULT_PATH__|${VAULT_PATH}|g" \
         "$REPO_DIR/systemd/${SERVICE_NAME}.service"
-
     printf "\n${C_BOLD}Commands that would run:${C_RESET}\n"
     printf "   install -d -m 755 %s\n" "$INSTALL_DIR"
     printf "   install -m 644 src/claude_telegram_bot.py %s\n" "$SCRIPT_DEST"
-    printf "   systemctl daemon-reload\n"
-    printf "   systemctl enable %s\n" "$SERVICE_NAME"
-    printf "   systemctl start %s\n" "$SERVICE_NAME"
-    printf "\n${C_GREEN}${C_BOLD}  Dry run complete — nothing was written.${C_RESET}\n\n"
+    printf "   install -m 755 scripts/claude-notify %s\n" "$NOTIFY_DEST"
+    printf "   systemctl daemon-reload && enable && start %s\n" "$SERVICE_NAME"
+    printf "\n${C_GREEN}${C_BOLD}  Dry run complete -- nothing was written.${C_RESET}\n\n"
     exit 0
 fi
 
-say "Installing bot script"
+say "Installing files"
 install -d -m 755 "$INSTALL_DIR"
 install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
-ok "Script -> $SCRIPT_DEST"
+ok "Bot script -> $SCRIPT_DEST"
+
+install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
+ok "claude-notify -> $NOTIFY_DEST"
 
 say "Writing environment file"
-cat > "$ENV_FILE" << EOF
+cat > "$ENV_FILE" <<EOF
 # claude-code-telegram environment -- managed by installer
-# Edit this file then: sudo systemctl restart $SERVICE_NAME
+# Edit then: sudo systemctl restart $SERVICE_NAME
 TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
 TELEGRAM_CHAT_ID=${CHAT_ID}
+ALLOWED_USERS=${ALLOWED_USERS}
 VAULT_PATH=${VAULT_PATH}
 CLAUDE_BIN=${CLAUDE_BIN}
 SESSION_MODE=${SESSION_MODE}
 SESSION_ID=${SESSION_ID}
+PERMISSION_MODE=${PERMISSION_MODE}
 RESPONSE_FORMAT=${RESPONSE_FORMAT}
 TYPING_INDICATOR=${TYPING_INDICATOR}
 CLAUDE_TIMEOUT=90
@@ -477,12 +617,30 @@ sleep 2
 if systemctl is-active --quiet "$SERVICE_NAME"; then
     ok "$SERVICE_NAME is running"
     printf "\n${C_GREEN}${C_BOLD}  Installation complete!${C_RESET}\n\n"
-    printf "   Tail logs:   ${C_DIM}journalctl -u %s -f${C_RESET}\n" "$SERVICE_NAME"
-    printf "   Stop:        ${C_DIM}sudo systemctl stop %s${C_RESET}\n" "$SERVICE_NAME"
-    printf "   Uninstall:   ${C_DIM}sudo ./scripts/uninstall.sh${C_RESET}\n"
-    printf "\n   You should receive a green online message in Telegram shortly.\n\n"
+    printf "   Tail logs:   journalctl -u %s -f\n" "$SERVICE_NAME"
+    printf "   Stop:        sudo systemctl stop %s\n" "$SERVICE_NAME"
+    printf "   Update:      curl -sSL https://raw.githubusercontent.com/trs0817/claude-code-telegram/main/bootstrap.sh | bash -s -- --update\n"
+    printf "   Uninstall:   sudo %s/scripts/uninstall.sh\n" "$REPO_DIR"
+    printf "\n   You should receive an online message in Telegram shortly.\n\n"
 else
-    warn "$SERVICE_NAME failed to start. Recent logs:"
-    journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+    warn "$SERVICE_NAME failed to start. Diagnosing..."
+    printf "\n"
+    # Try to give targeted advice
+    JOURNAL=$(journalctl -u "$SERVICE_NAME" -n 30 --no-pager 2>/dev/null || true)
+    if echo "$JOURNAL" | grep -q "credentials"; then
+        warn "Looks like a Claude auth issue."
+        info "Run: sudo -u $SERVICE_USER -H $CLAUDE_BIN auth login"
+        info "Then: sudo systemctl restart $SERVICE_NAME"
+    elif echo "$JOURNAL" | grep -q "BOT_TOKEN\|401\|Unauthorized"; then
+        warn "Looks like an invalid bot token."
+        info "Check your token in $ENV_FILE and restart."
+    elif echo "$JOURNAL" | grep -q "ModuleNotFoundError\|No module"; then
+        warn "Missing Python dependency."
+        info "Run: pip3 install requests --break-system-packages"
+        info "Then: sudo systemctl restart $SERVICE_NAME"
+    else
+        warn "Recent logs:"
+        echo "$JOURNAL" | tail -20
+    fi
     exit 1
 fi

@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#
+# claude-notify — send a Telegram message from any Claude skill or script
+#
+# Installed to /usr/local/bin/claude-notify by the claude-code-telegram installer.
+# Reads credentials from /etc/claude-code-telegram.env.
+#
+# Usage:
+#   claude-notify "Task complete."
+#   claude-notify -s "Silent notification (no phone buzz)."
+#   echo "Long message" | claude-notify
+#   claude-notify --help
+#
+# Repository: https://github.com/trs0817/claude-code-telegram
+# License: MIT
+
+set -euo pipefail
+
+ENV_FILE="/etc/claude-code-telegram.env"
+SILENT=0
+MESSAGE=""
+
+# ---------------------------------------------------------------------------
+# Parse arguments
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+Usage: claude-notify [-s] [MESSAGE]
+       echo "text" | claude-notify [-s]
+
+Send a Telegram message via the claude-code-telegram bot.
+
+Options:
+  -s, --silent    Send silently (no notification sound on phone)
+  -h, --help      Show this message
+
+MESSAGE may be passed as an argument or piped via stdin.
+If both are provided, the argument takes precedence.
+
+Configuration is read from $ENV_FILE.
+EOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -s|--silent)  SILENT=1; shift ;;
+        -h|--help)    usage ;;
+        --)           shift; MESSAGE="$*"; break ;;
+        -*)           printf "Unknown option: %s\n" "$1" >&2; exit 1 ;;
+        *)            MESSAGE="$1"; shift ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Read credentials
+# ---------------------------------------------------------------------------
+if [[ ! -f "$ENV_FILE" ]]; then
+    printf "claude-notify: env file not found: %s\n" "$ENV_FILE" >&2
+    printf "Is claude-code-telegram installed? Run the installer first.\n" >&2
+    exit 1
+fi
+
+# Source only the variables we need, safely
+BOT_TOKEN=""
+ALLOWED_USERS=""
+TELEGRAM_CHAT_ID=""
+
+while IFS='=' read -r key value; do
+    # Skip comments and blank lines
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" ]] && continue
+    key="${key// /}"
+    value="${value%%#*}"        # strip inline comments
+    value="${value%"${value##*[^[:space:]]}"}"  # rtrim
+    case "$key" in
+        TELEGRAM_BOT_TOKEN) BOT_TOKEN="$value" ;;
+        TELEGRAM_CHAT_ID)   TELEGRAM_CHAT_ID="$value" ;;
+        ALLOWED_USERS)      ALLOWED_USERS="$value" ;;
+    esac
+done < "$ENV_FILE"
+
+# Determine target chat ID: first entry of ALLOWED_USERS, else TELEGRAM_CHAT_ID
+CHAT_ID=""
+if [[ -n "$ALLOWED_USERS" ]]; then
+    CHAT_ID="${ALLOWED_USERS%%,*}"   # first entry
+fi
+if [[ -z "$CHAT_ID" ]]; then
+    CHAT_ID="$TELEGRAM_CHAT_ID"
+fi
+
+if [[ -z "$BOT_TOKEN" ]]; then
+    printf "claude-notify: TELEGRAM_BOT_TOKEN is not set in %s\n" "$ENV_FILE" >&2
+    exit 1
+fi
+if [[ -z "$CHAT_ID" ]]; then
+    printf "claude-notify: no chat ID found in %s\n" "$ENV_FILE" >&2
+    printf "Set ALLOWED_USERS or TELEGRAM_CHAT_ID.\n" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Read message from stdin if not provided as argument
+# ---------------------------------------------------------------------------
+if [[ -z "$MESSAGE" ]] && ! [[ -t 0 ]]; then
+    MESSAGE=$(cat)
+fi
+
+if [[ -z "$MESSAGE" ]]; then
+    printf "claude-notify: no message provided\n" >&2
+    printf "Usage: claude-notify \"message\" or echo \"message\" | claude-notify\n" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Send
+# ---------------------------------------------------------------------------
+API_URL="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
+
+PAYLOAD=(
+    --data-urlencode "chat_id=${CHAT_ID}"
+    --data-urlencode "text=${MESSAGE}"
+)
+if [[ $SILENT -eq 1 ]]; then
+    PAYLOAD+=(--data-urlencode "disable_notification=true")
+fi
+
+HTTP_CODE=$(curl -s -o /tmp/claude-notify-resp.json -w "%{http_code}" \
+    "${PAYLOAD[@]}" "$API_URL")
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+    printf "claude-notify: Telegram API error (HTTP %s)\n" "$HTTP_CODE" >&2
+    cat /tmp/claude-notify-resp.json >&2
+    exit 1
+fi

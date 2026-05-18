@@ -48,4 +48,4 @@ git clone --quiet --depth 1 "$REPO_URL" "$TMP_DIR/repo"
 ok "Repository cloned"
 
 say "Handing off to installer"
-exec sudo bash "$TMP_DIR/repo/scripts/install.sh" "$@"
+exec sudo bash "$TMP_DIR/repo/scripts/install.sh" 
