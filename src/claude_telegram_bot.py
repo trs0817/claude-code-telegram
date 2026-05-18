@@ -361,6 +361,10 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+# Public aliases used by tests and external callers
+strip_ansi = _strip_ansi
+chunk_text = _chunk_text
+
 def _build_cmd(prompt: str, plan_only: bool = False) -> List[str]:
     """Build the claude CLI invocation for the configured session and permission mode."""
     base = [str(CONFIG["CLAUDE_BIN"])]
