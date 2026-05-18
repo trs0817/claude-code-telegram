@@ -245,8 +245,11 @@ ok "Project directory: $VAULT_PATH"
 header "Step 4 of 7 — Telegram credentials"
 info "Get your bot token from @BotFather on Telegram."
 info ""
-BOT_TOKEN=$(ask_secret "Bot token (from @BotFather)")
-[[ -n "$BOT_TOKEN" ]] || die "Bot token cannot be empty."
+BOT_TOKEN=""
+while [[ -z "$BOT_TOKEN" ]]; do
+    BOT_TOKEN=$(ask_secret "Bot token (from @BotFather)")
+    [[ -z "$BOT_TOKEN" ]] && warn "Token cannot be empty — try again." >/dev/tty
+done
 [[ "$BOT_TOKEN" =~ ^[0-9]+: ]] || warn "Token format looks unusual — double-check it."
 
 printf "\n"
@@ -292,10 +295,14 @@ if [[ -z "$CHAT_ID" ]]; then
     info "Find your chat ID by visiting:"
     info "  https://api.telegram.org/bot<TOKEN>/getUpdates"
     info "after sending any message to your bot."
-    CHAT_ID=$(ask "Telegram chat ID (numeric)")
+    while true; do
+        CHAT_ID=$(ask "Telegram chat ID (numeric)")
+        [[ "$CHAT_ID" =~ ^-?[0-9]+$ ]] && break
+        warn "Must be a number — try again." >/dev/tty
+    done
 fi
 
-[[ "$CHAT_ID" =~ ^-?[0-9]+$ ]] || die "Chat ID must be a number. Got: $CHAT_ID"
+[[ "$CHAT_ID" =~ ^-?[0-9]+$ ]] || { warn "Must be a number — try again." >/dev/tty; CHAT_ID=$(ask "Telegram chat ID (numeric)"); }
 ok "Chat ID: $CHAT_ID"
 
 # ────────────────────────────────────────────────
