@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# check-cct-update — check GitHub for a newer claude-code-telegram release
+# Installed to /usr/local/bin/check-cct-update by the installer.
+# Intended for use in a weekly cron job; sends a Telegram notification via
+# claude-notify if a newer release is available.
+#
+# Usage: check-cct-update
+#        (no arguments; all config read from env/version files)
+
+set -euo pipefail
+
+VERSION_FILE="/usr/local/share/claude-code-telegram/VERSION"
+REPO="trs0817/claude-code-telegram"
+
+if [[ ! -f "$VERSION_FILE" ]]; then
+    echo "VERSION file not found at $VERSION_FILE — skipping update check." >&2
+    exit 0
+fi
+
+INSTALLED=$(cat "$VERSION_FILE")
+
+LATEST=$(curl -sf "https://api.github.com/repos/${REPO}/releases/latest" \
+    | grep '"tag_name"' | cut -d'"' -f4)
+
+if [[ -z "$LATEST" ]]; then
+    echo "Could not fetch latest release from GitHub — skipping." >&2
+    exit 0
+fi
+
+if [[ "$LATEST" == "$INSTALLED" ]]; then
+    exit 0
+fi
+
+claude-notify "🔄 claude-code-telegram update available: ${INSTALLED} → ${LATEST}
+Run on your server:
+curl -sSL https://raw.githubusercontent.com/${REPO}/main/bootstrap.sh | bash -s -- --update"

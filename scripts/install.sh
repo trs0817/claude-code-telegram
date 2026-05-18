@@ -35,8 +35,10 @@ IS_MACOS=0
 # Constants
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BOT_VERSION="v2.0.0"   # ← bump this with every release
 SERVICE_NAME="claude-code-telegram"
 INSTALL_DIR="/opt/claude-code-telegram"
+VERSION_FILE="/usr/local/share/claude-code-telegram/VERSION"
 SCRIPT_DEST="${INSTALL_DIR}/claude_telegram_bot.py"
 NOTIFY_DEST="/usr/local/bin/claude-notify"
 ENV_FILE="/etc/claude-code-telegram.env"
@@ -282,8 +284,13 @@ if [[ $UPDATE -eq 1 ]]; then
     install -d -m 755 "$INSTALL_DIR"
     install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
     ok "Bot script updated -> $SCRIPT_DEST"
+    install -d -m 755 "$(dirname "$VERSION_FILE")"
+    printf "%s\n" "$BOT_VERSION" > "$VERSION_FILE"
+    ok "Version file updated -> $VERSION_FILE ($BOT_VERSION)"
     install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
     ok "claude-notify updated -> $NOTIFY_DEST"
+    install -m 755 "$REPO_DIR/scripts/check-update" "/usr/local/bin/check-cct-update"
+    ok "check-cct-update updated -> /usr/local/bin/check-cct-update"
 
     if [[ $IS_MACOS -eq 1 ]]; then
         # Refresh launcher (script path may have changed)
@@ -322,6 +329,8 @@ if [[ $EXISTING_INSTALL -eq 1 ]] && [[ $DRY_RUN -eq 0 ]]; then
             say "Reinstalling with existing config"
             install -d -m 755 "$INSTALL_DIR"
             install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
+            install -d -m 755 "$(dirname "$VERSION_FILE")"
+            printf "%s\n" "$BOT_VERSION" > "$VERSION_FILE"
             install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
             if [[ $IS_MACOS -eq 1 ]]; then
                 sed "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
@@ -720,8 +729,23 @@ install -d -m 755 "$INSTALL_DIR"
 install -m 644 "$REPO_DIR/src/claude_telegram_bot.py" "$SCRIPT_DEST"
 ok "Bot script -> $SCRIPT_DEST"
 
+install -d -m 755 "$(dirname "$VERSION_FILE")"
+printf "%s\n" "$BOT_VERSION" > "$VERSION_FILE"
+ok "Version file -> $VERSION_FILE ($BOT_VERSION)"
+
 install -m 755 "$REPO_DIR/scripts/claude-notify" "$NOTIFY_DEST"
 ok "claude-notify -> $NOTIFY_DEST"
+
+install -m 755 "$REPO_DIR/scripts/check-update" "/usr/local/bin/check-cct-update"
+ok "check-cct-update -> /usr/local/bin/check-cct-update"
+
+# Weekly update check cron (Linux only; macOS can use launchd but cron works too)
+if [[ $IS_MACOS -eq 0 ]]; then
+    printf "0 9 * * 1 root /usr/local/bin/check-cct-update\n" \
+        > /etc/cron.d/claude-code-telegram-update
+    chmod 644 /etc/cron.d/claude-code-telegram-update
+    ok "Weekly update check cron -> /etc/cron.d/claude-code-telegram-update"
+fi
 
 if [[ $IS_MACOS -eq 1 ]]; then
     sed "s|__REPLACE_SCRIPT_PATH__|${SCRIPT_DEST}|g" \
