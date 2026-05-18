@@ -71,12 +71,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--check` flag for validating config without starting the poller
 - `--version` flag
 - Templated systemd unit with sensible hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths`)
-- Interactive `install.sh` that detects prerequisites, prompts for config, writes the unit (0600 — token-bearing), and starts the service
-- `uninstall.sh` for clean removal
-- Optional `notify-on-fail.conf.example` drop-in for integrating with an existing `notify-failure@.service` template
-- CI workflow (ruff lint + syntax check + pytest)
-- Bug report and feature request issue templates
-
-[Unreleased]: https://github.com/trs0817/claude-code-telegram/compare/v2.0.0...HEAD
-[2.0.0]: https://github.com/trs0817/claude-code-telegram/compare/v1.0.0...v2.0.0
-[1.0.0]: https://github.com/trs0817/claude-code-telegram/releases/tag/v1.0.0
+- Interactive `install.sh` that detects prerequisites, prompts for config, writes
