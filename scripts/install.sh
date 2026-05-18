@@ -809,8 +809,11 @@ svc_start
 
 sleep 2
 LOG_CMD=$(svc_log_cmd)
+if [[ $IS_MACOS -eq 1 ]]; then
+    STOP_CMD="launchctl unload $UNIT_DEST"
+else
+    STOP_CMD="systemctl stop $SERVICE_NAME"
+fi
 if svc_active; then
     ok "$SERVICE_NAME is running"
-    printf "\n${C_GREEN}${C_BOLD}  Installation complete!${C_RESET}\n\n"
-    printf "   Tail logs:   %s\n" "$LOG_CMD"
-    printf "   Stop:        sudo %s\n" "$(if [[ $IS_MACOS -e
+    printf "\n${C_GREEN}${C_BOLD}  Installation comp
