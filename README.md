@@ -161,7 +161,7 @@ See [config/.env.example](config/.env.example) for an annotated reference.
 ## Updating
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/trs08/claude-code-telegram/main/bootstrap.sh | bash -s -- --update
+curl -sSL https://raw.githubusercontent.com/trs0817/claude-code-telegram/main/bootstrap.sh | bash -s -- --update
 ```
 
 Pulls the latest bot script, redeploys it, and restarts the service. Your config is preserved.
