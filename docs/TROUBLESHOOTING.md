@@ -15,7 +15,7 @@ If `Active: failed` or `Active: activating (auto-restart)`, the bot is crashing 
 
 | Likely cause | Quick check | Fix |
 |---|---|---|
-| Wrong chat ID | `journalctl -u claude-code-telegram \| grep "Ignored message"` | Update `TELEGRAM_CHAT_ID=` in the unit and `systemctl restart` |
+| Wrong chat ID | `journalctl -u claude-code-telegram \| grep "Rejected message"` | Update `TELEGRAM_CHAT_ID=` in the unit and `systemctl restart` |
 | Telegram polling conflict | `journalctl -u claude-code-telegram \| grep -i conflict` | Stop the other poller (manual `python3 claude_telegram_bot.py` in another shell, or a duplicate service) |
 | Network egress blocked | `curl -sS https://api.telegram.org` from the host | Check firewall / DNS |
 
@@ -98,6 +98,26 @@ Rotate immediately:
 3. `sudo systemctl daemon-reload && sudo systemctl restart claude-code-telegram`
 
 The unit file's `0600` permissions help — but if it ended up in git or a backup, assume the token is compromised and rotate.
+
+## 11. Security considerations
+
+### Authentication model
+Chat ID is the **only authentication factor**. Anyone who can message your bot and whose chat ID is listed in `ALLOWED_USERS` (or `TELEGRAM_CHAT_ID`) gets full access to everything the bot can do. To reduce risk:
+
+- Set **`ALLOWED_USERS`** to just your own chat ID — never share it publicly
+- Consider enabling Telegram's **Privacy Mode** for your bot (via BotFather → `/setprivacy → enabled`) so the bot only receives messages directed to it
+- Rotate your bot token immediately if you suspect it has been compromised (see §10 above)
+- Keep `/etc/claude-code-telegram.env` at `0600` (the installer sets this, but verify with `ls -la /etc/claude-code-telegram.env`)
+
+### Permission mode
+`PERMISSION_MODE=unrestricted` runs Claude with `--dangerously-skip-permissions`, which gives it full filesystem and shell access on the host. A trusted user in unrestricted mode can, intentionally or not, run arbitrary code as the service user.
+
+- Default (`PERMISSION_MODE=safe`) is recommended for day-to-day use
+- In **both modes**, a plan/confirm step is shown before execution — use `/trust` to skip it for the current session (trust expires automatically after `TRUST_TTL_HOURS`, default 24 h)
+- Use `/trust off` or `/new` to revoke trust immediately
+
+### Trust TTL
+`/trust` enables execution without per-command confirmation. By default it expires after 24 hours (`TRUST_TTL_HOURS=24`). Set `TRUST_TTL_HOURS=0` to disable expiry (not recommended). The `/status` command shows the remaining trust window.
 
 ## Still stuck?
 
