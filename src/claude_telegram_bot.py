@@ -27,18 +27,19 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import html as _html  # noqa: F401 (imported for _html.escape usage)
 import re
 import signal
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional, Set
 
 import requests
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -99,6 +100,9 @@ CONFIG: Dict[str, object] = {
     "MAX_CHUNKS":      _env_int("MAX_CHUNKS", 3),
     "CHUNK_SIZE":      _env_int("CHUNK_SIZE", 3800),
     "POLL_INTERVAL":   _env_int("POLL_INTERVAL", 2),
+    "QUEUE_MAX":       _env_int("QUEUE_MAX", 100),         # max queued messages (0=unlimited)
+    "RATE_LIMIT":      _env_int("RATE_LIMIT", 10),         # max messages/min per user (0=off)
+    "TRUST_TTL_HOURS": _env_int("TRUST_TTL_HOURS", 24),   # trust expiry in hours (0=no expiry)
 }
 
 # ---------------------------------------------------------------------------
@@ -111,6 +115,15 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("claude-code-telegram")
+
+
+def _redact(text: str) -> str:
+    """Replace the bot token in a string so it never appears in log output."""
+    token = str(CONFIG.get("BOT_TOKEN", ""))
+    if token and token in text:
+        text = text.replace(token, "***TOKEN***")
+    return text
+
 
 # ---------------------------------------------------------------------------
 # Session state
@@ -126,6 +139,7 @@ class SessionState:
         self.start_time: datetime = datetime.now()
         self.msg_count: int = 0
         self.trust_mode: bool = False
+        self.trust_until: Optional[datetime] = None  # None = no expiry when trust is on
         self.last_prompt: Optional[str] = None
         self.last_chat_id: Optional[str] = None
         # Pending plan awaiting /go or /cancel
@@ -137,10 +151,35 @@ class SessionState:
     def reset(self) -> None:
         """Reset session to a clean state (/new)."""
         self.trust_mode = False
+        self.trust_until = None
         self.last_prompt = None
         self.last_chat_id = None
         self.pending_action = None
         self.pending_chunks = []
+
+    @property
+    def is_trusted(self) -> bool:
+        """True if trust mode is active and has not yet expired."""
+        if not self.trust_mode:
+            return False
+        if self.trust_until is None:
+            return True
+        if datetime.now() < self.trust_until:
+            return True
+        # Expired — auto-clear so status commands report accurately
+        self.trust_mode = False
+        self.trust_until = None
+        return False
+
+    @property
+    def trust_status_str(self) -> str:
+        """Human-readable trust status for /status and /help."""
+        if not self.is_trusted:
+            return "off"
+        if self.trust_until:
+            remaining = max(0, int((self.trust_until - datetime.now()).total_seconds() / 60))
+            return f"on (~{remaining}m remaining)"
+        return "on (no expiry)"
 
     @property
     def uptime_str(self) -> str:
@@ -152,8 +191,10 @@ class SessionState:
 
 _state = SessionState()
 
-# Single queue: tuples of (chat_id: str, text: str)
-_msg_queue: queue.Queue = queue.Queue()
+# Single queue: tuples of (chat_id: str, text: str).
+# maxsize prevents unbounded memory growth if Claude is slow.
+_queue_max = int(str(CONFIG["QUEUE_MAX"])) or 0  # 0 = unlimited per Queue semantics
+_msg_queue: queue.Queue = queue.Queue(maxsize=_queue_max)
 
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
@@ -178,7 +219,7 @@ def send_message(text: str, parse_mode: Optional[str] = None,
         r = requests.post(_tg_url("sendMessage"), data=payload, timeout=10)
         r.raise_for_status()
     except Exception as exc:
-        log.error("send_message failed: %s", exc)
+        log.error("send_message failed: %s", _redact(str(exc)))
 
 
 def _send_typing(chat_id: Optional[str] = None) -> None:
@@ -205,7 +246,7 @@ def get_updates(offset: int = 0) -> List[dict]:
         r.raise_for_status()
         return r.json().get("result", [])
     except Exception as exc:
-        log.error("get_updates error: %s", exc)
+        log.error("get_updates error: %s", _redact(str(exc)))
         return []
 
 # ---------------------------------------------------------------------------
@@ -321,11 +362,13 @@ def _wrap_prompt(
 
     # --- Execute after approved plan ---------------------------------------
     if approved_plan:
+        # Use fixed-width separators instead of XML tags to prevent tag-injection
+        # by user-supplied content breaking the plan/execute boundary.
         return (
             "The following plan has been reviewed and approved by the user. "
             "Execute it now without re-planning.\n\n"
-            f"<approved_plan>\n{approved_plan}\n</approved_plan>\n\n"
-            f"<original_request>\n{prompt}\n</original_request>"
+            f"--- APPROVED PLAN ---\n{approved_plan}\n--- END PLAN ---\n\n"
+            f"--- ORIGINAL REQUEST ---\n{prompt}\n--- END REQUEST ---"
         )
 
     # --- Normal execution --------------------------------------------------
@@ -400,7 +443,9 @@ def run_claude(prompt: str, plan_only: bool = False) -> tuple:
     """
     work_dir = str(CONFIG["VAULT_PATH"])
     cmd = _build_cmd(prompt, plan_only=plan_only)
-    log.info("Running: %s in %s", cmd, work_dir)
+    # Log command without the full prompt to avoid persisting user input in journald
+    _safe_cmd = cmd[:-1] + ["<prompt>"] if len(cmd) >= 2 and cmd[-2] == "-p" else cmd
+    log.info("Running: %s in %s", _safe_cmd, work_dir)
 
     try:
         result = subprocess.run(
@@ -432,7 +477,7 @@ def run_claude(prompt: str, plan_only: bool = False) -> tuple:
     except FileNotFoundError:
         return None, f"Claude binary not found at: {CONFIG['CLAUDE_BIN']}"
     except Exception as exc:
-        return None, f"Unexpected error: {exc}"
+        return None, f"Unexpected error: {_redact(str(exc))}"
 
 # ---------------------------------------------------------------------------
 # Bot command handlers
@@ -464,7 +509,7 @@ def handle_help(_args: str, chat_id: str) -> None:
     }.get(str(mode), str(mode))
 
     perm_label = "unrestricted ⚠️" if perm == "unrestricted" else "safe (file edits only)"
-    trust_note = " • trust ON" if _state.trust_mode else ""
+    trust_note = f" • trust {_state.trust_status_str}" if _state.is_trusted else ""
     queue_note = f" • {_msg_queue.qsize()} queued" if _msg_queue.qsize() else ""
     pending_note = " • plan waiting for /go or /cancel" if _state.pending_action else ""
 
@@ -518,7 +563,7 @@ def handle_status(_args: str, chat_id: str) -> None:
             f"*Uptime:* {_state.uptime_str}\n"
             f"*Session:* {CONFIG['SESSION_MODE']}\n"
             f"*Permissions:* {CONFIG['PERMISSION_MODE']}\n"
-            f"*Trust mode:* {'on' if _state.trust_mode else 'off'}\n"
+            f"*Trust mode:* {_state.trust_status_str}\n"
             f"*Queue depth:* {_msg_queue.qsize()}\n"
             f"*Pending plan:* {'yes — /go or /cancel' if _state.pending_action else 'none'}\n"
             f"*Messages this session:* {_state.msg_count}\n"
@@ -530,7 +575,7 @@ def handle_status(_args: str, chat_id: str) -> None:
             f"Uptime: {_state.uptime_str}\n"
             f"Session: {CONFIG['SESSION_MODE']}\n"
             f"Permissions: {CONFIG['PERMISSION_MODE']}\n"
-            f"Trust mode: {'on' if _state.trust_mode else 'off'}\n"
+            f"Trust mode: {_state.trust_status_str}\n"
             f"Queue: {_msg_queue.qsize()}\n"
             f"Pending plan: {'yes' if _state.pending_action else 'none'}\n"
             f"Messages: {_state.msg_count}\n"
@@ -545,26 +590,29 @@ def handle_new(_args: str, chat_id: str) -> None:
 
 
 def handle_trust(args: str, chat_id: str) -> None:
-    # Trust mode skips the plan step in safe permission mode.
-    # In unrestricted mode there is no plan step, so trust is not applicable.
-    if CONFIG["PERMISSION_MODE"] == "unrestricted":
-        send_message(
-            "ℹ️ Already in unrestricted mode — there is no plan step to skip.",
-            chat_id=chat_id,
-        )
-        return
+    # Trust mode skips the plan/confirm step for both safe and unrestricted modes.
+    # A TTL (TRUST_TTL_HOURS) automatically expires trust to limit the blast radius
+    # of a compromised session.
     if args.strip().lower() == "off":
         _state.trust_mode = False
+        _state.trust_until = None
         _md("🔒 Trust mode *off* — plan confirmation re-enabled.",
             "Trust mode off — plan confirmation re-enabled.", chat_id=chat_id)
     else:
         _state.trust_mode = True
+        ttl = int(str(CONFIG["TRUST_TTL_HOURS"]))
+        if ttl > 0:
+            _state.trust_until = datetime.now() + timedelta(hours=ttl)
+            expiry_note = f" (expires in {ttl}h)"
+        else:
+            _state.trust_until = None
+            expiry_note = " (no expiry — use /trust off or /new to revoke)"
         pm = _parse_mode()
         if pm:
-            msg = ("⚡ Trust mode *on* — plan step skipped for this session.\n"
+            msg = (f"⚡ Trust mode *on* — plan step skipped{expiry_note}.\n"
                    "Send `/trust off` or `/new` to re-enable confirmation.")
         else:
-            msg = "Trust mode on. Send /trust off or /new to re-enable confirmation."
+            msg = f"Trust mode on{expiry_note}. Send /trust off or /new to re-enable."
         send_message(msg, parse_mode=pm, chat_id=chat_id)
 
 
@@ -665,12 +713,11 @@ def _execute_prompt(
     )
 
     # Determine whether to run the plan step first.
-    # safe mode = plan required unless trust is on or caller already approved.
-    needs_plan = (
-        CONFIG["PERMISSION_MODE"] == "safe"
-        and not _state.trust_mode
-        and not skip_plan
-    )
+    # Plan confirmation is required in BOTH safe and unrestricted modes unless the
+    # user has active trust (via /trust) or this is a post-/go execution.
+    # Unrestricted mode executes with --dangerously-skip-permissions after approval,
+    # but still requires human review by default to prevent accidental host RCE.
+    needs_plan = not _state.is_trusted and not skip_plan
 
     if needs_plan:
         _send_typing(chat_id)
@@ -746,6 +793,29 @@ def _worker() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Rate limiting (main thread only — accessed exclusively by poll(), no locking needed)
+# ---------------------------------------------------------------------------
+
+_rate_buckets: Dict[str, List[float]] = {}
+
+
+def _is_rate_limited(chat_id: str) -> bool:
+    """Return True if chat_id has sent ≥ RATE_LIMIT messages in the last 60 seconds."""
+    limit = int(str(CONFIG["RATE_LIMIT"]))
+    if limit <= 0:
+        return False
+    now = time.time()
+    window = 60.0
+    bucket = _rate_buckets.setdefault(chat_id, [])
+    # Prune timestamps outside the sliding window
+    _rate_buckets[chat_id] = [t for t in bucket if now - t < window]
+    if len(_rate_buckets[chat_id]) >= limit:
+        return True
+    _rate_buckets[chat_id].append(now)
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Poll loop (main thread)
 # ---------------------------------------------------------------------------
 
@@ -769,13 +839,36 @@ def poll() -> None:
             chat_id = str(message.get("chat", {}).get("id", ""))
             allowed: Set[str] = CONFIG["ALLOWED_USERS"]  # type: ignore[assignment]
             if allowed and chat_id not in allowed:
-                log.warning("Ignored message from unauthorized chat_id: %s", chat_id)
+                log.error("Rejected message from unauthorized chat_id: %s", chat_id)
                 continue
             text = message.get("text", "").strip()
             if not text:
                 continue
-            log.info("Queuing from %s: %s", chat_id, text[:80])
-            _msg_queue.put((chat_id, text))
+            if _is_rate_limited(chat_id):
+                log.warning("Rate limit exceeded for chat_id %s — message dropped", chat_id)
+                try:
+                    send_message(
+                        "⚠️ Rate limit exceeded. Please wait before sending another message.",
+                        chat_id=chat_id,
+                    )
+                except Exception:
+                    pass
+                continue
+            log.info("Queuing from %s: %.80s", chat_id, text)
+            try:
+                _msg_queue.put_nowait((chat_id, text))
+            except queue.Full:
+                log.warning(
+                    "Queue full (%d slots) — dropping message from %s",
+                    int(str(CONFIG["QUEUE_MAX"])), chat_id,
+                )
+                try:
+                    send_message(
+                        "⚠️ Bot is busy — message dropped. Try again shortly.",
+                        chat_id=chat_id,
+                    )
+                except Exception:
+                    pass
         time.sleep(int(str(CONFIG["POLL_INTERVAL"])))
 
 

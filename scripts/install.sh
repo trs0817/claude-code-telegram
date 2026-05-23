@@ -35,7 +35,7 @@ IS_MACOS=0
 # Constants
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOT_VERSION="v2.0.1"   # ← bump this with every release
+BOT_VERSION="v2.1.0"   # ← bump this with every release
 SERVICE_NAME="claude-code-telegram"
 INSTALL_DIR="/opt/claude-code-telegram"
 VERSION_FILE="/usr/local/share/claude-code-telegram/VERSION"
@@ -671,8 +671,11 @@ fi
 if [[ $DRY_RUN -eq 1 ]]; then
     printf "\n${C_BOLD}${C_CYAN}-- Generated: %s${C_RESET}\n" "$ENV_FILE"
     printf '%s\n' "$(printf -- '-%.0s' {1..50})"
+    # Mask sensitive credentials in dry-run output to prevent token leakage
+    # into terminal scrollback, CI logs, or screen recordings.
+    MASKED_TOKEN="${BOT_TOKEN:0:6}***"
     cat <<EOF
-TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
+TELEGRAM_BOT_TOKEN=${MASKED_TOKEN}
 TELEGRAM_CHAT_ID=${CHAT_ID}
 ALLOWED_USERS=${ALLOWED_USERS}
 VAULT_PATH=${VAULT_PATH}
