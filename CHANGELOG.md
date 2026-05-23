@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-05-23
+
+### Security
+
+- **[CRITICAL] bootstrap.sh integrity** — bootstrap now clones a pinned release tag (`RELEASE_TAG`, default `v2.1.0`) instead of `main`; optionally verifies the commit hash against `EXPECTED_COMMIT` to detect supply-chain tampering. Override with `RELEASE_TAG=main` to restore previous behaviour.
+- **[HIGH] Unrestricted mode now requires plan confirmation** — `PERMISSION_MODE=unrestricted` previously bypassed the plan/confirm step entirely, allowing any authorized Telegram message to trigger full host RCE. Both `safe` and `unrestricted` modes now show a plan first and require `/go` or `/trust` before executing. Use `/trust` to skip confirmation for the session (subject to TTL).
+- **[HIGH] Bot token redacted from logs** — exception strings in `log.error` calls could leak `TELEGRAM_BOT_TOKEN` into `journalctl`. All error paths now pass through `_redact()`, which replaces the token with `***TOKEN***`.
+- **[HIGH] XML tag injection in `_wrap_prompt` fixed** — user-supplied prompts were embedded inside XML tags (`<original_request>`, `<approved_plan>`), allowing injected closing tags to break the plan/execute boundary. Replaced with plain-text section headers (`--- ORIGINAL REQUEST ---` etc.) that cannot be escaped by user input.
+- **[HIGH] `/trust` now expires** — trust grants no longer last indefinitely. Default TTL is 24 h (configurable via `TRUST_TTL_HOURS`; set to `0` to disable expiry). The `/status` command shows remaining trust time. `/trust off` or `/new` revoke immediately.
+- **[MEDIUM] Message queue bounded** — `queue.Queue` was unbounded; a slow Claude invocation combined with a flood of messages could exhaust memory. Queue is now capped at `QUEUE_MAX` messages (default 100); overflow messages are dropped with a Telegram notification.
+- **[MEDIUM] Per-user rate limiting** — new sliding-window limiter enforces `RATE_LIMIT` messages per minute per chat ID (default 10). Excess messages are dropped with a Telegram warning.
+- **[MEDIUM] Bot token masked in `--dry-run` output** — `install.sh --dry-run` previously printed the raw token to stdout. Token is now shown as `<first-6-chars>***`.
+- **[LOW] User prompts removed from command log** — `run_claude` logged the full `claude -p <prompt>` invocation (including the wrapped user prompt) to journald. Command is now logged with `<prompt>` as a placeholder.
+- **[LOW] Unauthorized access escalated to ERROR** — rejected messages from unknown chat IDs were logged at `WARNING`. Now logged at `ERROR` so they surface in monitoring/alerting.
+- **[LOW] Security considerations documented** — new §11 in `docs/TROUBLESHOOTING.md` covering authentication model, permission mode risks, and trust TTL.
+
+### Added
+
+- `QUEUE_MAX` env var — max queued messages before overflow (default `100`)
+- `RATE_LIMIT` env var — max messages per minute per user (default `10`, `0` = off)
+- `TRUST_TTL_HOURS` env var — trust grant expiry in hours (default `24`, `0` = no expiry)
+- `SessionState.is_trusted` property — checks trust_mode and expiry atomically; auto-clears expired trust
+- `SessionState.trust_status_str` property — human-readable trust status used by `/status` and `/help`
+- `_redact(text)` — sanitizes bot token from any string before logging
+- `_is_rate_limited(chat_id)` — sliding-window rate check (main thread only)
+
 ## [2.0.1] — 2026-05-18
 
 ### Added
@@ -77,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI workflow (ruff lint + syntax check + pytest)
 - Bug report and feature request issue templates
 
-[Unreleased]: https://github.com/trs0817/claude-code-telegram/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/trs0817/claude-code-telegram/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/trs0817/claude-code-telegram/compare/v2.0.1...v2.1.0
+[2.0.1]: https://github.com/trs0817/claude-code-telegram/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/trs0817/claude-code-telegram/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/trs0817/claude-code-telegram/releases/tag/v1.0.0
